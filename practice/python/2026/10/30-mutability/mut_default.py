@@ -26,6 +26,10 @@ def g(a: int, L: list[int] | None = None) -> list[int]:
       3. 调用方自己传列表时，改的必须是**他传进来的那个对象**（id 相同）
     """
     # TODO: 你的方法体（提示：默认值只是"调用方没给"的信号，不是容器本身）
+    if L is None:
+        L = []
+    L.append(a)
+    return L
 
 
 if __name__ == "__main__":
@@ -34,12 +38,15 @@ if __name__ == "__main__":
     print(f(2))
     print(f(3))
     print("f.__defaults__ =", f.__defaults__)
+    assert f.__defaults__ is not None
     print("id(f.__defaults__[0]) =", id(f.__defaults__[0]))
 
     # ── TODO：换成 g 再跑一遍（写完方法体再取消注释）──
-    # print(g(1))
-    # print(g(2))
-    # print(g(3))
-    # print("g.__defaults__ =", g.__defaults__)
-    # mine = [99]
-    # print(g(7, mine), "mine is 同一个对象：", mine is g(0, mine))
+    print(g(1))
+    print(g(2))
+    print(g(3))
+    print("g.__defaults__ =", g.__defaults__)
+    mine = [99]
+    ret = g(7, mine)
+    same = ret is mine
+    print(ret, "| mine =", mine, "| 同一个对象：", same)
