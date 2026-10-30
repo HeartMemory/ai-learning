@@ -49,11 +49,12 @@ practice/<桶>/<年>/<月>/<日期-主题>/
 | 目录 | 主题 | 关键判据（实测） |
 |---|---|---|
 | `2026/10/28-python-env/` | uv 工程骨架 + 环境自检（S0 前置） | `uv run python check_env.py` 9 个包无 MISSING；`uv run ruff check .` 全绿；`sys.prefix` 指向本工程 `.venv` |
-| `2026/10/30-mutability/` | 可变性陷阱（默认参数 / 函数传参 / `+=`） | 待填 |
+| `2026/10/30-mutability/` | 可变性陷阱（默认参数 / 函数传参 / `+=`） | `mut_default.py`：`f(1/2/3)` → `[1]` / `[1, 2]` / `[1, 2, 3]`，`f.__defaults__` 变 `([1, 2, 3],)`、`f(1) is f.__defaults__[0]` 为 `True`；`g.__defaults__` 恒 `(None,)`。`mut_arg.py`：`append` 调用方可见（`id` 不变）、`nums = nums + [x]` 不可见、返回新对象 `id` 不同、函数内 `+=` 原地改；`ruff check` 全绿 |
+| `2026/10/30-containers/` | **dict / set / tuple**（S0 第 4 章）：tool schema 形状、合并的 id 判据、可哈希 | `dict_schema.py`：schema 可 `json.dumps` 且 `required is` 入参 = `True`；`KeyError` / `None` / 默认值 `[]` 两次 `is` = `False`；`\|` 换 id、`\|=` 保 id。`set_tuple.py`：（进行中） |
 
 ### `ai/`（LLM 层）
 
 | 目录 | 主题 | 关键判据（实测） |
 |---|---|---|
 | `2026/10/29-llm-hello/` | **模型 API 打通**（过渡期闸门 · 第一次 `chat.completions`） | 正文非空 + 打印 `usage` 三个 token 数 + 端到端耗时；**换模型只改 `.env` 三个变量、`ask.py` 一行不动**。✅ 已跑通（10-29）：`deepseek-flash` / **38·58·96 tokens** / **1254.49 ms**（复跑 1303.34 ms） |
-| `2026/10/30-multi-turn/` | **多轮对话**：`messages` 历史维护（可变性知识第一次实战） | 每轮 `len(messages)` **+2**、消息数 2→4→6、`prompt_tokens` 逐轮变大、**第 2 轮能复述第 1 轮问题**。实测待填 |
+| `2026/10/30-multi-turn/` | **多轮对话**：`messages` 历史维护（可变性知识第一次实战） | 每轮 `len(messages)` **+2**、消息数 **2→4→6**；`prompt_tokens` **46→62→96**（增量 +16 / +34，与上一轮回答长度成正比 = 每次都重发完整历史）；**第 2 轮完整复述第 1 轮问题**；首轮端到端 **1185.61 ms**（含建连） |
