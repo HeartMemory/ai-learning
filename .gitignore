@@ -1,0 +1,32 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ===== 密钥与本地配置（.env 永不入库，模板 .env.example 入库）=====
+.env
+.env.*
+!.env.example
+*.key
+secrets.*
+
+# ===== 运行产物（trace / 日志 / 缓存）=====
+*.log
+runs/
+.cache/
+
+# ===== 交接件（含个人信息，不上传）=====
+HANDOVER.md
+
+# ===== 编辑器 / 系统 =====
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+*.tmp

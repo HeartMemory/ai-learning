@@ -1,0 +1,23 @@
+[project]
+name = "llm-hello"
+version = "0.1.0"
+description = "过渡期闸门：模型 API 打通（一次 chat.completions + token + 耗时）"
+requires-python = ">=3.14"
+dependencies = [
+    "openai",
+    "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文注释 / docstring 里的全角标点是刻意的，不算易混淆字符
+ignore = ["RUF001", "RUF002", "RUF003"]

@@ -1,0 +1,30 @@
+[project]
+name = "python-env"
+version = "0.1.0"
+description = "S0 环境基线：uv 工程骨架 + 环境自检"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx",
+    "openai>=3.40.0",
+    "pydantic",
+    "python-dotenv",
+    "rich>=15.0.0",
+    "tenacity>=9.2.1",
+    "tiktoken>=0.14.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "pytest",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文注释 / docstring 里的全角标点是刻意的，不算"易混淆字符"（RUF001/002/003 专治全角）
+ignore = ["RUF001", "RUF002", "RUF003"]
