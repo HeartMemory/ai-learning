@@ -67,7 +67,7 @@ ai-learning/
 |---|---|---|---|
 | 10-28 周三 | AI 主线立项；env 工程 `practice/python/2026/10/28-python-env` 建成（uv + ruff + 依赖基线） | Python 3.14.8 ｜ uv 0.12.23 ｜ ruff 全绿 | ✅ |
 | 10-29 周四 | 模型 API 打通：`practice/ai/2026/10/29-llm-hello`（`ask.py` / `check_llm.py`）；Python 升到 3.14.8 | **96 tokens**（38+58）｜ **1254.49 ms** | ✅ |
-| 10-30 周五 | S0 D2：可变性陷阱（第 3 章）+ 练习区按 `python/` / `ai/` 分桶 | 待填 | 🔄 |
+| 10-30 周五 | S0 第 3 章**可变性陷阱**（默认参数 `__defaults__` / 改对象 vs 重新绑定 / `+=` 看类型）+ 多轮对话实战 `practice/ai/2026/10/30-multi-turn`；练习区按 `python/` / `ai/` 分桶并按年/月分层 | **prompt 46→62→96** ｜ 消息数 **2→4→6** ｜ 首轮 **1185.61 ms** ｜ `uv sync` **59 包 / 10517 ms** | ✅ |
 
 （每天收工后更新）
 
