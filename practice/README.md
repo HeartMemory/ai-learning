@@ -50,7 +50,8 @@ practice/<桶>/<年>/<月>/<日期-主题>/
 |---|---|---|
 | `2026/10/28-python-env/` | uv 工程骨架 + 环境自检（S0 前置） | `uv run python check_env.py` 9 个包无 MISSING；`uv run ruff check .` 全绿；`sys.prefix` 指向本工程 `.venv` |
 | `2026/10/30-mutability/` | 可变性陷阱（默认参数 / 函数传参 / `+=`） | `mut_default.py`：`f(1/2/3)` → `[1]` / `[1, 2]` / `[1, 2, 3]`，`f.__defaults__` 变 `([1, 2, 3],)`、`f(1) is f.__defaults__[0]` 为 `True`；`g.__defaults__` 恒 `(None,)`。`mut_arg.py`：`append` 调用方可见（`id` 不变）、`nums = nums + [x]` 不可见、返回新对象 `id` 不同、函数内 `+=` 原地改；`ruff check` 全绿 |
-| `2026/10/30-containers/` | **dict / set / tuple**（S0 第 4 章）：tool schema 形状、合并的 id 判据、可哈希 | `dict_schema.py`：schema 可 `json.dumps` 且 `required is` 入参 = `True`；`KeyError` / `None` / 默认值 `[]` 两次 `is` = `False`；`\|` 换 id、`\|=` 保 id。`set_tuple.py`：（进行中） |
+| `2026/10/30-containers/` | **dict / set / tuple**（S0 第 4 章）：tool schema 形状、合并的 id 判据、可哈希 | `dict_schema.py`：schema 可 `json.dumps` 且 `required is` 入参 = `True`；`KeyError` / `None` / 默认值 `[]` 两次 `is` = `False`；`\|` 换 id、`\|=` 保 id。`set_tuple.py`：去重 **6→3** 且与手工一致；`list` / `dict` / `set` 不可哈希、`(1, [2])` 不可哈希；`{1, True, 1.0}` 元素数 **1**；嵌套 `[1, [2, {"a": 3}, (4, [5])]]` 可哈希（判据 **7/7 绿**，10-30 补测） |
+| `2026/10/31-async/` | **async / await 与事件循环**（S0 第 5 章）：让出点、`gather` vs `TaskGroup`、同步阻塞 | `bench.py`：`serial` **2.02 s** / `gather` **1.00 s** / `TaskGroup` **1.00 s**；直接 `time.sleep` + `gather` **2.00 s** → `to_thread` **1.00 s**；`gather` 抛异常后其余任务**不取消**（`safe` 照跑完）、`TaskGroup` **取消**并抛 `ExceptionGroup`；`ruff check` 全绿 |
 
 ### `ai/`（LLM 层）
 

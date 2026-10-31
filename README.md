@@ -68,6 +68,7 @@ ai-learning/
 | 10-28 周三 | AI 主线立项；env 工程 `practice/python/2026/10/28-python-env` 建成（uv + ruff + 依赖基线） | Python 3.14.8 ｜ uv 0.12.23 ｜ ruff 全绿 | ✅ |
 | 10-29 周四 | 模型 API 打通：`practice/ai/2026/10/29-llm-hello`（`ask.py` / `check_llm.py`）；Python 升到 3.14.8 | **96 tokens**（38+58）｜ **1254.49 ms** | ✅ |
 | 10-30 周五 | S0 第 3 章**可变性陷阱**（默认参数 / 改对象 vs 重新绑定 / `+=` 看类型）+ 第 4 章 **dict / set / tuple**（tool schema 形状、`\|` 与 `\|=` 的 id 判据、**可哈希**与多层递归 `to_key`）；多轮对话实战 `practice/ai/2026/10/30-multi-turn`；练习区按 `python/` / `ai/` 分桶并按年/月分层 | **prompt 46→62→96** ｜ 消息数 **2→4→6** ｜ 首轮 **1185.61 ms** ｜ `uv sync` **59 包 / 10517 ms** ｜ 第 4 章判据 **7/7 绿**（`{1, True, 1.0}` 只留 **1** 个；嵌套键可哈希） | ✅ |
+| 10-31 周六 | S0 第 5 章 **async / await 与事件循环**：顺序 await vs `gather` vs `TaskGroup` 三条实测 + `time.sleep` 同步阻塞反例与 `to_thread` 解药 + 异常对照（`gather` 不取消 / `TaskGroup` 取消并抛 `ExceptionGroup`）；练习 `practice/python/2026/10/31-async` | `serial` **2.02 s** ｜ `gather` **1.00 s** ｜ `TaskGroup` **1.00 s** ｜ 同步阻塞 **2.00 s** → `to_thread` **1.00 s** ｜ 判据 **5/5 绿** ｜ **0 次模型调用（0 token）** | ✅ |
 
 （每天收工后更新）
 
