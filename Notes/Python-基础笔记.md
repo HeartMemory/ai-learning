@@ -5,7 +5,7 @@
 > 代码实例都在 `practice/` 下的对应目录里，可运行验证。
 > 原则：**只记真实学到的内容与真实踩过的坑**；每个知识点尽量配一条**可实测的判据**。
 
-**覆盖进度**：**第 1 章 语法总览 ✅**（2026-10-29）｜ **第 2 章 list 容器 API ✅**（2026-10-29）｜ **第 3 章 可变性陷阱 ✅**（2026-10-30）｜ **第 4 章 dict·set·tuple（可哈希）✅**（2026-10-30）｜ 装饰器 / async / httpx / pydantic **未开始**
+**覆盖进度**：**第 1 章 语法总览 ✅**（2026-10-29）｜ **第 2 章 list 容器 API ✅**（2026-10-29）｜ **第 3 章 可变性陷阱 ✅**（2026-10-30）｜ **第 4 章 dict·set·tuple（可哈希）✅**（2026-10-30）｜ **第 5 章 async / await 与事件循环 ✅**（2026-10-31）｜ 函数进阶（`*args` / 装饰器）/ 模块与包 / httpx / pydantic **未开始**
 
 ## 回访清单
 
@@ -31,6 +31,10 @@
 | 16 | **可哈希 = hash 终身不变 + 可比较** | `(1, [2])` 不可哈希；`frozenset([[1,2]])` **构造时**就 `TypeError` | 10-30 | — | 🟡 已实测 |
 | 17 | **`id()` 是内存地址，会被复用** | 内联 `id(f()) == id(f())` 不可信；先各绑变量、或直接 `a is b` | 10-30 | — | 🟡 已实测 |
 | 18 | **相等语义决定键的形状** | dict 的 `==` 忽略顺序 ⇒ 摊平必须 `frozenset`；用 `tuple(items)` 会造出两个不同的键 | 10-30 | — | 🟡 已实测 |
+| 19 | **`async def` 调用不执行** | `type(nap("a"))` 是 `coroutine`；漏 `await` ⇒ 退出报 `never awaited`，耗时 **0.00 s** | 10-31 | — | 🟡 已实测 |
+| 20 | **`await` 是执行点，也是让出点** | 顺序 await 两次 `sleep 1` = **2.02 s**；`gather` 一次提交 = **1.00 s** | 10-31 | — | 🟡 已实测 |
+| 21 | **有 `await` ≠ 会让出** | `await` 内部无挂起的协程 ⇒ `X前→X后→Y前→Y后`（零交错）；强制让一轮用 `await asyncio.sleep(0)` | 10-31 | — | 🟡 已实测 |
+| 22 | **同步阻塞是毒药** | `time.sleep` + `gather` = **2.00 s**；`await asyncio.to_thread(time.sleep, 1)` = **1.00 s** | 10-31 | — | 🟡 已实测 |
 
 ---
 
@@ -532,6 +536,171 @@ a is b                                      # False（两个对象同时存活�
 
 ---
 
+## 5. async / await：让出点决定一切（2026-10-31 · S0）
+
+> 实例：`practice/python/2026/10/31-async/`（`bench.py` 四条判据一次跑完）
+> 一条根：**`async def` 只是贴标签，`await` 才是执行点；而"快"来自 `await` 让出控制权给事件循环。**
+
+### 5.1 `async def` = 贴标签：调用不执行
+
+```python
+async def nap(name):
+    await asyncio.sleep(1)
+    return f"{name} done"
+
+c = nap("a")        # ← 只是造了个「待办单」
+type(c)             # <class 'coroutine'>，函数体一行都没跑
+```
+
+- 调用 `async def` 函数 → 返回 **coroutine 对象**，**不执行**。
+- 漏了 `await` → 不报错、不执行，退出时只嘟囔 `RuntimeWarning: coroutine 'nap' was never awaited`，耗时 **0.00 s**。**看到 0.00 s 就先查 `await`。**
+- `await` 只能写在 `async def` 里：普通函数里写待 `SyntaxError: 'await' outside function`（语法层就拦住，比 5.1 那个 Warning 好抓）。
+
+### 5.2 三个对象：coroutine / Task / Future
+
+| 东西 | 是什么 | 谁创建 |
+|---|---|---|
+| **coroutine 对象** | 一张待办单，**没有执行权** | 调用 `async def` 函数 |
+| **Task** | 协程 + 被事件循环**调度** + 能取结果 / 取消 | `create_task()` / `gather` / `TaskGroup` 内部 |
+| **Future** | "未来会有值"的底层占位，几乎不直接用 | 事件循环 / 库 |
+
+`gather` / `TaskGroup` 干的事就是**把 N 个 coroutine 变成 N 个 Task 排队**。
+
+### 5.3 让出点：唯一能切换的地方
+
+**只有三种情况控制权回到事件循环**：
+
+| 路径 | 任务还活着吗 | 之后 |
+|---|---|---|
+| `await` 一个**未完成**的 awaitable | ✅ 挂起，活着 | 事件就绪后**被切回来接着跑** |
+| 函数 `return` / 抛异常 | ❌ 结束（Task 完成） | 没有下文，结果只能 `.result()` 取 |
+| 被 `cancel()` | ❌ 结束 | 抛 `CancelledError` |
+
+口诀：**让出 = 中途离场还会回来；结束 = 散场。**
+
+**两种"等"要分清**：
+
+| 状态 | 在哪里等 | 何时继续 |
+|---|---|---|
+| 任务已创建、**还没跑** | **就绪队列** | 当前任务让出 → 循环立刻轮到它 |
+| 任务已跑、**卡在 IO** | **等待队列** | IO 就绪 / 定时器到点 → 标回就绪 |
+
+> **"有空" 不是 CPU 空闲，而是「有人让出」。** 同步阻塞代码里永远没人让出 ⇒ 队列全饿死。
+
+### 5.4 有 `await` ≠ 会让出（今天最贵的一条）
+
+`await` 一个**内部没有挂起点**的协程（或已完成的 Future），控制权**不会**交出去，直接穿过去：
+
+| 情况 | 实测输出 | 结论 |
+|---|---|---|
+| `await instant()`（内部无 await） | `X前 1.06 / X后 1.08 / Y前 1.08 / Y后 1.09` | **零交错** ⇒ 没让出 |
+| `await asyncio.sleep(0)` | `X前 1.13 / Y前 1.13 / X后 1.14 / Y后 1.14` | **严格交错** ⇒ 真让出 |
+
+判据：**看「被 await 的东西需不需要等外部」**（网络 / 定时器 / 磁盘 / 另一个任务）。要强制让一轮就写 `await asyncio.sleep(0)`。
+
+### 5.5 并发 ≠ 并行
+
+- 事件循环**只有一个线程**（实测 `threading.active_count()` = **1**），所有协程挤在它上面轮流跑。
+- 同一时刻**只有一个任务**在 CPU 上执行；"同时"指**同时在等外部**。
+- 推论：**纯 CPU 活（自算 1 秒）用 `async` 不会变快**，只会多一层调度开销。async 只对"等"有效。
+
+### 5.6 `gather`：批量递单 + 按传入顺序收结果
+
+```python
+results = await asyncio.gather(nap("a"), nap("b", 0.2))   # ['a done', 'b done']
+```
+
+| 事实 | 判据 |
+|---|---|
+| 返回 **list**，顺序 = **传入顺序** | `b` 只睡 0.2 s 仍排在第二位 |
+| 任务**提交即建好**，但**开跑要等让出** | 提交完 `done=False`（0.92 ms），0.99 ms 才见 `[a] 开始` |
+| 首个异常**立刻**抛给等待者，**不取消**其余 | 0.05 s 抛 `RuntimeError`，另一个任务 1.00 s **正常跑完** |
+| `return_exceptions=True` | 异常当结果收进 list，不中断 |
+| `gather` 自己**没有抢占权** | 里面放 `time.sleep` 照样串行（见 5.7） |
+
+> ⚠️ **类型存根坑**：运行时返回 `list`，但 Pylance 的存根说 `tuple` ⇒ `-> list[str]` 会报 `reportReturnType`。解法 `list(await asyncio.gather(...))`，**别把注解改成 `tuple`**（注解要描述运行时）。
+
+### 5.7 同步阻塞是毒药（`gather` 救不回来）
+
+| 写法 | 实测 | 原因 |
+|---|---|---|
+| `gather(blocking("a"), blocking("b"))`，`blocking` 里 `time.sleep(1)` | **2.00 s**，`a` 出来才见 `b` 进入 | 没有 await ⇒ 唯一的线程被睡死 ⇒ 循环停摆 |
+| `gather(to_thread(time.sleep, 1), ...)` | **1.00 s**，交错 | `to_thread` 把阻塞扔进**另一个线程**，`await` 它是真挂起 ⇒ 循环空出来 |
+
+**线程 = 抢占式**（OS 强制切，睡一个线程不影响别人）；**协程 = 协作式**（代码不让出，谁也插不进来）。
+
+**识别清单**：`async def` 里出现 `time.sleep` / `requests.get` / 同步 DB 驱动 / 大文件 `read()` / 同步 SDK ⇒ 全是毒。
+
+**解药优先级**：`asyncio.sleep`、`httpx.AsyncClient`、`asyncpg`、官方 `Async*` SDK **>**（实在没有异步版才）`await asyncio.to_thread(...)`。
+
+`to_thread` 两个边界：① 线程池默认 `min(32, cpu+4)`，超了要排队；② CPU 密集受 GIL 限制，**不会变快**，只是不卡循环。
+
+> **实战形态**：装了 `openai` 同步版却在 `async def` 里调 → 20 个并发请求变成严格串行，代码看着"全是 async"却查不出原因。判据：**并发 20 个，总耗时 ≈ 单个 × 20 ⇒ 中毒。**
+
+### 5.8 `TaskGroup`：结构化的 `gather`（3.11+，新代码首选）
+
+```python
+async with asyncio.TaskGroup() as tg:
+    task_a = tg.create_task(nap("a"))       # 提交，不 await
+    task_b = tg.create_task(nap("b", 0.2))  # 必须接住返回值（否则可能被回收）
+# ← 退出 with 的这一刻才「等」
+return [task_a.result(), task_b.result()]
+```
+
+| 事实 | 判据 |
+|---|---|
+| 等待发生在**退出 `async with`** | 出块前 `done=False`；块内取 `.result()` → `InvalidStateError` |
+| **不返回 list** | 结果只能从各 Task `.result()` 取 |
+| 一个失败 → **取消其余** | 另一个任务打印"被取消" |
+| 多个异常合并成 **`ExceptionGroup`** | `except*` 或 `except ExceptionGroup`；`CancelledError` 不计入 |
+| `create_task` 必须在块内 | 组非活跃时传协程 → 关闭协程并抛 `RuntimeError` |
+| 总耗时 = **最慢那个** | `max(1.0, 0.2)` = **1.00 s** |
+
+**`gather` vs `TaskGroup`**：要"容忍部分失败、按传入顺序拿 list" → `gather`；要"一批同生共死" → `TaskGroup`。
+
+### 5.9 常用 API 面
+
+| Task 自身 | 作用 / 坑 |
+|---|---|
+| `.result()` | 取结果；未完成 → `InvalidStateError`；有异常 → **原样重抛** |
+| `.exception()` | 取异常**对象**不抛；没异常为 `None` |
+| `.done()` / `.cancelled()` | 结束了没 / 是否被取消结束 |
+| `.cancel()` | **请求**取消，下一次让出点才生效；同步阻塞里取消不掉 |
+| `.set_name()` / `.get_name()` | 起名，日志排查必用（默认 `Task-5`） |
+| `.add_done_callback()` | 完成回调（里面不能 await） |
+
+| 模块级 | 用途 |
+|---|---|
+| `gather` | 一批，按传入顺序收 list |
+| `TaskGroup` | 一批，同生共死 |
+| `asyncio.wait(tasks, timeout=)` | 拿 `(done, pending)`，**超时不抛异常**，pending 要自己 `cancel()` |
+| `asyncio.as_completed(tasks)` | 按**完成顺序**产出（3.13 起可 `async for`）—— "谁先回来先处理" |
+| `asyncio.timeout(d)` | 给一段代码限时（3.11+，推荐），抛内置 `TimeoutError` |
+| `asyncio.wait_for(aw, d)` | 给单个 awaitable 限时 |
+| `asyncio.shield(aw)` | 保护不被取消（扣费 / 写文件） |
+| `asyncio.to_thread(fn, *a)` | 同步阻塞的兜底 |
+
+### 5.10 坑清单
+
+- 漏 `await` ⇒ 不执行、不报错、耗时 0.00 s（只看 Warning 不看耗时最容易漏）
+- 有 `await` 不等于让出（5.4）；要强制让一轮写 `await asyncio.sleep(0)`
+- `return` 是**结束**不是让出；结束之后循环才收回控制权
+- `time.sleep` / `requests` 写进 `async def` = 整套并发作废（5.7）
+- `create_task` 不接返回值 ⇒ 任务可能被回收；不 await 也不取结果 ⇒ 异常凭空消失（`Task exception was never retrieved`）
+- `gather` 抛首个异常后其余任务**不被取消**，但 `main` 一退，`asyncio.run` 收尾会把它们 cancel ⇒ 要观察"跑完"必须在 `except` 后继续 await
+- `asyncio.wait()` **不能**直接传协程（3.11 起禁止），先 `create_task`
+- 3.10 起所有 asyncio API 的 `loop` 参数已移除；3.14 起 `get_event_loop()` 不再隐式建循环 ⇒ 入口一律 `asyncio.run()`
+
+### 5.11 判据（可复测）
+
+1. 顺序 `await` 两次 `sleep 1` = **2.02 s**；`gather` = **1.00 s**；`TaskGroup` = **1.00 s**
+2. `gather` 结果顺序 = 传入顺序（`b` 只睡 0.2 s 仍排第二）
+3. `time.sleep` + `gather` = **2.00 s**；`await asyncio.to_thread(time.sleep, 1)` = **1.00 s**
+4. 一个任务抛异常：`gather` 下另一个**照跑完**；`TaskGroup` 下**被取消**并抛 `ExceptionGroup`
+5. `await` 内部无挂起的协程 ⇒ 输出零交错；`await asyncio.sleep(0)` ⇒ 严格交错
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。
@@ -541,6 +710,6 @@ a is b                                      # False（两个对象同时存活�
 | S0 | 4 | ✅ 已展开为 **第 4 章**（2026-10-30）；`Counter` / `defaultdict` **用到时再补** |
 | S0 | 5 | 函数进阶：`*args / **kwargs`、闭包、装饰器（对照 C# 委托 / Attribute） |
 | S0 | 6 | 模块与包：`import` 机制、`__name__`、虚拟环境 |
-| S0 | 7 | `async/await` 与 C# `Task` 的异同、事件循环 |
+| S0 | 7 | ✅ 已展开为 **第 5 章**（2026-10-31）：`async/await` 与 C# `Task` 的异同、事件循环。⚠️ 正文章号按**实际学习顺序**编（第 5 章 ↔ 本表编号 7），两者不再一一对应 |
 | S0 | 8 | httpx 并发抓取 + 存 JSON（S0 交付物） |
 | S0 | 9 | pydantic 数据校验（S1 结构化输出的前置） |
