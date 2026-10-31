@@ -76,4 +76,5 @@ ai-learning/
 
 - [Python 基础笔记](Notes/Python-基础笔记.md)：**语言层**专册（语法总览 C#→Python 对照 / list 容器 API / 可变性陷阱 …），2026-10-29 建
 - [AI Agent 笔记](Notes/AI-Agent-笔记.md)：**LLM 与 Agent 层**专册（环境基线 / 模型 API 打通 / usage 与 reasoning_tokens …），2026-10-28 建
+- [回访清单](Notes/回访清单.md)：**周日盲写的题库**（只收"答错会静默写出 bug"的坑；销账进 `Notes/_archive/回访-已销.md`，平时不读）
 - 每日复盘：`Notes/YYYY/MM/DD.md`（自 2026-10-28 起连续）
