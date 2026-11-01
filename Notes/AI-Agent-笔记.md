@@ -233,6 +233,102 @@ ChatCompletion
 
 ---
 
+## 4. 并发与异步的底层：GIL、线程池与「该并发什么」（2026-11-01 · 计基 30min · 复盘日整理）
+
+### 4.1 一句话根
+
+**并发只在"等"上赚钱**，而"能不能等"由**阻塞发生在哪一层**决定 —— 不是由 `async` 关键字决定。
+第 5 章讲的是**语言层怎么写**（让出点）；本章讲**操作系统层为什么这样**，并且回答一个更实用的问题：**哪些活该并发、用什么并发**。
+
+### 4.2 抢占 vs 协作：两种"切"
+
+| | 线程（抢占式） | 协程（协作式） |
+|---|---|---|
+| 谁决定切 | **OS 调度器**，时间片到就切，代码无法拒绝 | **代码自己** `await` 让出，不让就没人能切 |
+| "睡一个"的代价 | `time.sleep` 只睡**这个线程**，别的线程照跑 | `await sleep` 挂起的是**这个任务**；但**同步** `time.sleep` 睡死整个事件循环线程 |
+| 切换成本 | 上下文切换 + 每线程独立栈（MB 级） | 单次切换 **≈10 µs**（10-31 实测：8 行交替输出 `0.78→0.83 ms`） |
+| 实测对照 | — | 串行 **2.02 s** → `gather` **1.00 s**（10-31） |
+
+⇒ 协程便宜在**切换成本**，强在**单线程扛住上万并发等待**；弱在**一个任务不让出，全体饿死**。
+
+### 4.3 GIL：为什么"多开线程"救不了 CPU 密集
+
+- CPython **默认构建**带 GIL：同一瞬间**只有一个线程在执行 Python 字节码**。多线程只是在 GIL 上**轮流**跑，**不并行**。
+- ⇒ `ThreadPoolExecutor(max_workers=4)` 跑 4 个纯 Python 死循环，总耗时 ≈ 串行，**还多付切换开销**（加速比 ≈ 1，不是 4）。
+- **唯一例外**：C 扩展在计算时**主动释放 GIL**（NumPy、`zlib`、`hashlib` 等），那一段才真能并行。
+
+### 4.4 `to_thread` 的官方边界（最容易写错的一条）
+
+`asyncio` 文档 · *Coroutines and tasks → Running in threads* 的 Note 原文：
+
+> Due to the **GIL**, `asyncio.to_thread()` can **typically only be used to make IO-bound functions non-blocking**. However, for extension modules that **release the GIL** or alternative Python implementations that don't have one, `asyncio.to_thread()` can also be used for CPU-bound functions.
+
+⇒ **`to_thread` 是"把阻塞挪到别的线程"，不是"把计算变快"**。
+10-31 的 `1.00 s` 之所以成立，是因为 `time.sleep` 属于 **IO 型等待**；换成纯 Python 的 CPU 忙等，`to_thread` 只会更慢（还得加线程开销）。
+**记住这句话的用途**：它同时解释了 10-31 的"毒药"与"解药"——毒是毒在**占了事件循环唯一的线程**，解是解在**把等待挪走**，与算得快不快无关。
+
+### 4.5 线程池开多大：默认值有公式，且 3.13 改过
+
+| 版本 | `ThreadPoolExecutor` 默认 `max_workers` |
+|---|---|
+| 3.5 | CPU 数 × 5 |
+| 3.8 – 3.12 | `min(32, os.cpu_count() + 4)` |
+| **3.13 / 3.14（本环境 3.14.8）** | **`min(32, (os.process_cpu_count() or 1) + 4)`** |
+
+- 3.8 的设计理由：**至少留 5 个 worker 给 IO**，上限 32 给"会释放 GIL 的 CPU 任务"。
+- 3.13 把 `os.cpu_count()` 换成 **`os.process_cpu_count()`**：按**本进程可用 CPU** 算 —— 容器 / cgroup 限核时不会"看到宿主机 64 核就开 32 线程"。
+- **3.14 未再改该公式**（3.14 在本类的变更是新增 `ctxkwargs` / `prepare_context()` / `InterpreterPoolExecutor`）。
+- 文档明确**不推荐**线程池跑长任务：所有入队线程会在解释器退出前被 join，且**早于** `atexit` 处理器。
+
+### 4.6 3.14 的四个真变化（会静默踩，全部来自官方 What's New）
+
+| 变化 | 影响 | 正确写法 |
+|---|---|---|
+| `asyncio.get_event_loop()` 无当前循环 ⇒ **抛 `RuntimeError`**，不再隐式创建 | 老教程的 `loop = asyncio.get_event_loop()` 直接炸 | 一般用 `asyncio.run()`；分阶段/复用用 `asyncio.Runner`；async 内部用 `get_running_loop()` |
+| **policy 系统整体弃用**（`get/set_event_loop_policy`、`WindowsProactorEventLoopPolicy` 等，**计划 3.16 移除**） | 按平台选循环的老写法要改 | `asyncio.run(main(), loop_factory=asyncio.SelectorEventLoop)` |
+| **`asyncio.iscoroutinefunction()` 弃用**（3.16 移除） | 用了会告警，将来报错 | `inspect.iscoroutinefunction()` |
+| `create_task()` 系列（含 `TaskGroup.create_task()`）接受**任意关键字参数**，`name` / `context` 不再特殊处理 | 自定义任务工厂时名称要自己按工厂的 `name` 参数处理 | 交给工厂 |
+
+### 4.7 free-threading：3.14「正式支持」≠「GIL 没了」
+
+- **PEP 779：free-threaded Python 在 3.14 是 officially supported**（3.13 引入 PEP 703 时还是 experimental）。
+- 但它仍是**独立构建**（编译期 `Py_GIL_DISABLED`）；**默认构建照样带 GIL**。
+- 代价：free-threaded 构建单线程性能损失 **5–10%**。
+- 附带福利：asyncio 对 free-threading 有一等支持 —— **不同线程里的多个事件循环可以并行**，随线程数线性扩展。
+- ⇒ 对本环境的结论：**3.14.8 默认构建 = 有 GIL**，4.3 / 4.4 的结论**照旧成立**。**别把"3.14 正式支持 free-threading"读成"GIL 已经没了"** —— 这是今年最容易传错的一条。
+
+### 4.8 这张卡的正事：AI 项目里「该并发什么」
+
+| 动作 | 类型 | 有效手段 | 判据 |
+|---|---|---|---|
+| **调模型 API**（等网络） | **IO 密集** | `gather` + 异步客户端（`httpx.AsyncClient` / SDK 异步接口） | 3 路并发总耗时 **≈ 最慢那路**，不是三者之和 |
+| 并发抓网页 / 读文件 | IO 密集 | 同上 | 同上 |
+| 本地算 token / 跑纯 Python 的预处理 | **CPU 密集** | **进程池**（`ProcessPoolExecutor`），不是线程 | 线程池加速比 **≈1** ⇒ 说明被 GIL 卡住 |
+| NumPy 大矩阵 / 压缩 / 哈希 | CPU 密集但**释放 GIL** | 线程、`to_thread` **有效** | 加速比 ≈ 核数 |
+
+⭐ **一句话判据：等外部 → 协程；算自己 → 进程（除非库自己放 GIL）。**
+⭐ 对 S1/S3 的直接含义：**模型调用、检索、批量 embedding 的"等"全在 IO 层** ⇒ 并发收益大；**本地分词 / 拼 prompt / 解析 JSON** 是 CPU ⇒ 并发无收益。S1 的流式与并发批处理就靠这条判断。
+
+### 4.9 自测卡（遮住上面，口述；答不出就回扫对应小节）
+
+1. `to_thread` 能让 4 个纯 Python 死循环快 4 倍吗？为什么？
+2. 为什么同步 `time.sleep` 在 `async def` 里会毁掉并发，而 `await asyncio.sleep` 不会？
+3. 3.14 线程池默认开几个线程（写出公式）？为什么把 `cpu_count` 换成 `process_cpu_count`？
+4. 「free-threading 在 3.14 正式支持」—— 这对我们的 3.14.8 默认构建有没有影响？
+5. 3.14 里判断"是不是协程函数"该用哪个？`asyncio.iscoroutinefunction()` 怎么了？
+
+### 4.10 查证来源（2026-11-01 实查 · 官方文档优先）
+
+| 结论 | 来源 |
+|---|---|
+| `to_thread` 的 GIL 限制（只能救 IO 密集） | `asyncio` 文档 · Coroutines and tasks → Running in threads（官方 Note 原文） |
+| 线程池默认值公式与 3.8 / 3.13 变更 | `concurrent.futures` 文档 · `ThreadPoolExecutor.max_workers` |
+| PEP 779 free-threading officially supported / policy 弃用 / `iscoroutinefunction` 弃用 / `create_task` 参数变化 | `What's New in Python 3.14` |
+
+> 交叉方式：**"`to_thread` 受 GIL 限制"** 与 **"线程池默认值只为 IO 设计（≥5 worker）+ 上限 32 留给释放 GIL 的任务"** 是两份独立页面的说法，互证"多线程不是万能的"；`to_thread` 页面本身**没有**写线程池大小，所以 4.5 的数字必须去 `concurrent.futures` 查 —— **一处来源不足就补第二处**。
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
