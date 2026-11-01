@@ -20,6 +20,11 @@ secrets.*
 runs/
 .cache/
 
+# ===== 数据 / 本地存储（评测集 / 向量库 / 本地库）=====
+*.parquet
+*.sqlite
+*.db
+
 # ===== 交接件（含个人信息，不上传）=====
 HANDOVER.md
 
