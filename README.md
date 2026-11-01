@@ -69,6 +69,7 @@ ai-learning/
 | 10-29 周四 | 模型 API 打通：`practice/ai/2026/10/29-llm-hello`（`ask.py` / `check_llm.py`）；Python 升到 3.14.8 | **96 tokens**（38+58）｜ **1254.49 ms** | ✅ |
 | 10-30 周五 | S0 第 3 章**可变性陷阱**（默认参数 / 改对象 vs 重新绑定 / `+=` 看类型）+ 第 4 章 **dict / set / tuple**（tool schema 形状、`\|` 与 `\|=` 的 id 判据、**可哈希**与多层递归 `to_key`）；多轮对话实战 `practice/ai/2026/10/30-multi-turn`；练习区按 `python/` / `ai/` 分桶并按年/月分层 | **prompt 46→62→96** ｜ 消息数 **2→4→6** ｜ 首轮 **1185.61 ms** ｜ `uv sync` **59 包 / 10517 ms** ｜ 第 4 章判据 **7/7 绿**（`{1, True, 1.0}` 只留 **1** 个；嵌套键可哈希） | ✅ |
 | 10-31 周六 | S0 第 5 章 **async / await 与事件循环**：顺序 await vs `gather` vs `TaskGroup` 三条实测 + `time.sleep` 同步阻塞反例与 `to_thread` 解药 + 异常对照（`gather` 不取消 / `TaskGroup` 取消并抛 `ExceptionGroup`）；练习 `practice/python/2026/10/31-async` | `serial` **2.02 s** ｜ `gather` **1.00 s** ｜ `TaskGroup` **1.00 s** ｜ 同步阻塞 **2.00 s** → `to_thread` **1.00 s** ｜ 判据 **5/5 绿** ｜ **0 次模型调用（0 token）** | ✅ |
+| 11-01 周日 | **复盘日**：① **下一阶段排期校准**（S0 前 5 章已于 10-29~10-31 提前落地 ⇒ D2/D3/D5 三格只补缺口，D4 与交付日不动）② **计基「并发与异步」底层**（GIL / `to_thread` 的官方边界 / 线程池默认值 / free-threading 真相 / `httpx` 硬缺口）③ 自测 5 题 + 清单销账 | 自测 **2/5**（**0 题全对 · 2 题半对 · 3 题不知道**）｜ 环境探针 `cpu_count` **20** · `process_cpu_count` **20** · `max_workers` **24** · `gil_enabled` **True** ｜ 笔记 AI 册 **3 → 4 章（+96 行）** ｜ 回访清单 **24 → 26** ｜ 索引对账 **练习 6 == 6 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 
 （每天收工后更新）
 
