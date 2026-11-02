@@ -71,6 +71,8 @@ ai-learning/
 | 10-31 周六 | S0 第 5 章 **async / await 与事件循环**：顺序 await vs `gather` vs `TaskGroup` 三条实测 + `time.sleep` 同步阻塞反例与 `to_thread` 解药 + 异常对照（`gather` 不取消 / `TaskGroup` 取消并抛 `ExceptionGroup`）；练习 `practice/python/2026/10/31-async` | `serial` **2.02 s** ｜ `gather` **1.00 s** ｜ `TaskGroup` **1.00 s** ｜ 同步阻塞 **2.00 s** → `to_thread` **1.00 s** ｜ 判据 **5/5 绿** ｜ **0 次模型调用（0 token）** | ✅ |
 | 11-01 周日 | **复盘日**：① **下一阶段排期校准**（S0 前 5 章已于 10-29~10-31 提前落地 ⇒ D2/D3/D5 三格只补缺口，D4 与交付日不动）② **计基「并发与异步」底层**（GIL / `to_thread` 的官方边界 / 线程池默认值 / free-threading 真相 / `httpx` 硬缺口）③ 自测 5 题 + 清单销账 | 自测 **2/5**（**0 题全对 · 2 题半对 · 3 题不知道**）｜ 环境探针 `cpu_count` **20** · `process_cpu_count` **20** · `max_workers` **24** · `gil_enabled` **True** ｜ 笔记 AI 册 **3 → 4 章（+96 行）** ｜ 回访清单 **24 → 26** ｜ 索引对账 **练习 6 == 6 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 
+| 11-02 周一 | **S0 缺口补齐（3 项）**：① **推导式**（list / dict / set 三种筐、多重 `for` vs 嵌套、`if` 位置的两种语义、独立作用域、PEP 709 已内联）② **切片**（永远新对象 / 浅拷贝 / 切片赋值原地可变长 / 越界截断）③ **可迭代 vs 迭代器**（协议、`iter` 幂等、`yield` 与 `yield from`、一次性）；练习两处 `practice/python/2026/11/02-comprehension` + `11/02-slice-iter` | 判据 **17/17 + 8/8 + 16/16 = 41/41 绿** ｜ 官方文档查证 **6 条页面**（教程 / 语言参考 / stdtypes / copy / PEP 709 / PEP 649）｜ Python 册 **5 → 6 章（+74 行）** ｜ 回访清单 **26 → 29** ｜ 索引对账 **练习 8 == 8 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
+
 （每天收工后更新）
 
 ## 沉淀笔记
