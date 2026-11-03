@@ -751,6 +751,49 @@ return [task_a.result(), task_b.result()]
 
 ---
 
+## 7. httpx 与一次 HTTPS 请求的完整账单（2026-11-03 · S0 提前）
+
+> 本章把「发一个请求」拆成**两张账单**：握手费（连接层）与等待重叠（并发层）—— 两个实验各测一行。
+> 代码：`practice/python/2026/11/03-httpx/`（`fetch_basics.py` 判据 4 条 + `fetch_concurrent.py` 判据 4 条）
+> 官方依据：python-httpx.org 的 Quickstart / Advanced·Clients / Async 三页互证
+
+### 7.1 请求/响应模型：GET = 按门牌号寄信，不是去某处"查找"
+
+- **URL 解剖**：`https://httpbin.org/delay/1` = scheme + 主机 + 路径。**主机走连接层**（DNS → TCP/TLS），**路径进请求行**（`GET /delay/1 HTTP/1.1` + `Host:` 头）原文写给服务器。
+- **服务器是路由匹配的程序，不是文件柜**：`/delay/1`、`/status/404` 后面没有存好的文件，是服务器代码现场生成的响应；都不匹配 → 404。
+- **`params` 把拼接交给 httpx**：手工拼查询串会漏 percent-encoding（`好` → `%E5%A5%BD`）；`params={"q": "httpx", "page": "1"}` 值全是**文本**（写 `"1"` 不写 `1`），值可以是 list（同名键重复）。
+- **`r.url` 是 URL 对象不是字符串**：`"q=httpx" in r.url` 直接 `TypeError`，要 `str(r.url)`；更严的验法是 `r.url.params["q"]`（结构化取值，不依赖子串顺序）。
+- **`raise_for_status()` = 「状态码」与「异常」之间的翻译官**：httpx 默认**不把状态码当异常**（404 是服务器好好回的话）；`raise_for_status()` 对非 2xx 抛 `HTTPStatusError`，对 2xx **不抛且返回 Response**（可链式：`httpx.get(url).raise_for_status().json()`）。3xx **不算**错误（httpx 默认不跟随重定向，要 `follow_redirects=True`）。
+- **异常两支是兄弟不是父子**：`HTTPError` = 基类；`RequestError`（请求没走完，带 `.request`）∥ `HTTPStatusError`（走完了但非 2xx，带 `.request` + `.response`）。**互不为子类 ⇒ `except` 顺序无所谓**；坏域名在 `get()` **内部**就抛（连接没建立 ⇒ 根本没有响应和状态码，`raise_for_status()` 无从谈起）。
+- **默认超时 5 秒**（网络无活动）；`timeout=None` 禁用。
+
+### 7.2 Client：连接池 = 把付过的握手费留住
+
+- **一次 HTTPS 首请求的账单**：DNS（1 次，可缓存）→ TCP 三次握手（1 RTT，"双方都确认对方收得到"恰好三次）→ TLS 握手（1-2 RTT：证书防冒充 + 非对称换对称密钥）→ HTTP 往返（才开始传正文）。
+- **顶层 API 每个请求各付全套；`Client` 用连接池复用 keep-alive 连接**，握手只付一次 —— 这是「复用更快」的全部根。**判据 4 两组请求数完全相同（都是 5 个），差的只是握手次数**，别理解成"Client 能一次抓多个"。
+- **实测（5 × `httpbin.org/get`）**：每次新建 **3.431 s**（0.686 s/请求）vs 复用 **1.573 s**（0.315 s/请求）⇒ 握手费真实单价 **≈ 0.37 s/次**，复用快 **2.2×**。
+- **单批两版账单几乎一样，差别在第二批起**：并发批共享 client 也照样开多条新连接（握手互相重叠）；省下的钱在**第二批**（keep-alive 连接还在池里，零握手）—— 官方"别在热循环里实例化 client"的精确含义是**损失在复用，不在单批**。
+- **`AsyncClient` = 协程版**：方法要 `await`；`await` 只能写在 `async def` 里（普通函数里是 `SyntaxError`）。`async with ... as client` = 自动建池 + 离开时自动 `aclose()`（防连接泄漏）。
+
+### 7.3 并发抓取：省的全是"等待"
+
+- **实测（5 × `httpbin.org/delay/1`，服务器故意睡 1 s）**：串行 **7.036 s** ≈ 5 × (1 s 等 + 0.4 s 握手)；`gather` 并发 **1.723 s** ≈ 单个请求的完整成本 ⇒ **加速比 4.1×**。与第 5 章 `serial 2.02 s` vs `gather 1.00 s` 同一条定律：**等待不占 CPU，所以能重叠**。
+- **协程 ≠ 执行**：`tasks = [fetch_one(...) for ...]` 此刻**一个请求都没发**，只是 5 张工单；`asyncio.gather(*tasks)` 拆包一次性提交，结果**按传入顺序**返回。漏 `await` ⇒ 错误**后移**到"用结果的地方"（`RuntimeWarning: never awaited` + 断言 `TypeError`），结果列表里装的是协程对象。
+- **`*` 的对仗**：定义 `def f(*args)` 是**打包**，调用 `f(*lst)` 是**拆包**；不拆包 = 把整个列表当**一个**参数 ⇒ `gather` 报 `TypeError`（要求每个参数都是 awaitable）。
+- **短板效应**：`gather` 要等**全部** ⇒ 抓 5 个**不同主机**，总耗时 ≈ **最慢单个**（不是单个）；同主机同延迟才近似单个。给并发批做超时按最慢者算，配 `return_exceptions` 防一个拖垮全场。
+- **计时纪律**：单样本是随机变量（一个请求抽风就翻车）+ 先跑的批付冷启动费 ⇒ **耗时对比只记数字、复跑取稳态，不写死 assert**。
+
+### 7.4 判据（可复测 · 汇总）
+
+1. `params={"q": "httpx", "page": "1"}` → `str(r.url)` 里同时有 `q=httpx` 与 `page=1`
+2. `/status/404` → `HTTPStatusError`（`exc.response.status_code` == 404）；`no-such-host.invalid` → `RequestError`
+3. 5 × `/get`：新建 **3.431 s** vs 复用 **1.573 s**（差额 ≈ 每请求 0.37 s 握手费）
+4. 5 × `/delay/1`：串行 **7.036 s** vs `gather` **1.723 s**（**4.1×**）
+5. 两条结果条数 == 5 且全 200；JSON 落盘 `json.load` 读回 == 内存对象
+6. `gather` 不拆包 → **`TypeError`**；漏 `await` → 结果是协程对象 + `never awaited`
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。
@@ -759,6 +802,7 @@ return [task_a.result(), task_b.result()]
 |---|---|---|
 | S0 | 4 | ✅ 已展开为 **第 4 章**（2026-10-30）；`Counter` / `defaultdict` **用到时再补** |
 | S0 | 缺口 | ✅ 已展开为 **第 6 章**（2026-11-02）：推导式 / 切片 / 可迭代与迭代器 —— 原计划未单列，属 10-31 复盘补的缺口 |
+| S0 | — | ✅ 已展开为 **第 7 章**（2026-11-03）：httpx / 一次 HTTPS 请求的账单 / 并发抓取 —— 原排期 11-05，随交付物地基提前 2 天落地 |
 | S0 | 5 | 函数进阶：`*args / **kwargs`、闭包、装饰器（对照 C# 委托 / Attribute） |
 | S0 | 6 | 模块与包：`import` 机制、`__name__`、虚拟环境 |
 | S0 | 7 | ✅ 已展开为 **第 5 章**（2026-10-31）：`async/await` 与 C# `Task` 的异同、事件循环。⚠️ 正文章号按**实际学习顺序**编（第 5 章 ↔ 本表编号 7），两者不再一一对应 |
