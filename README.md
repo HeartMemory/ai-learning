@@ -74,6 +74,8 @@ ai-learning/
 | 11-02 周一 | **S0 缺口补齐（3 项）**：① **推导式**（list / dict / set 三种筐、多重 `for` vs 嵌套、`if` 位置的两种语义、独立作用域、PEP 709 已内联）② **切片**（永远新对象 / 浅拷贝 / 切片赋值原地可变长 / 越界截断）③ **可迭代 vs 迭代器**（协议、`iter` 幂等、`yield` 与 `yield from`、一次性）；练习两处 `practice/python/2026/11/02-comprehension` + `11/02-slice-iter` | 判据 **17/17 + 8/8 + 16/16 = 41/41 绿** ｜ 官方文档查证 **6 条页面**（教程 / 语言参考 / stdtypes / copy / PEP 709 / PEP 649）｜ Python 册 **5 → 6 章（+74 行）** ｜ 回访清单 **26 → 29** ｜ 索引对账 **练习 8 == 8 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 | 11-03 周二 | **S0·httpx 提前落地**（原排期 11-05，S0 交付物唯一发动机）：请求/响应模型（URL 解剖 / `params` / `raise_for_status` / 异常两支）+ **TCP·TLS 握手账单**与 Client 连接池 + 串行 vs `gather` 并发抓取 + JSON 落盘读回；练习 `practice/python/2026/11/03-httpx`（判据 1-8）；随堂测两轮（对 2 · 半对 4 · 全错 0 → 回访 +3）；函数与模块顺延待插格 | 判据 **12/12 绿** ｜ 新建 **3.431 s** vs 复用 **1.573 s**（**2.2×**，差 ≈ 0.37 s/请求握手费）｜ 串行 **7.036 s** vs 并发 **1.723 s**（**4.1×**）｜ 官方查证 **3 页**（Quickstart / Clients / Async）｜ Python 册 **6 → 7 章（+43 行）** ｜ 回访 **29 → 32** ｜ 索引对账 **练习 9 == 9 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 
+| 11-04 周三 | **S0·OOP 与协议**（D4，S0 语言层收口）：`@dataclass` 生成物与「注解不校验」（**静态门 vs 运行时门**三分层）+ `__post_init__` 校验与 `field(init=False)` 派生字段、`default_factory`（装饰时 `ValueError`）、`frozen`（浅冻结 / 可绕过 / 可哈希边界）；`Protocol` 三件事（默认静态 / `runtime_checkable` 只查成员存在 / 数据成员同标准）+ `__len__` / `__iter__` / `__enter__` / `__exit__`；练习 `practice/python/2026/11/04-oop-protocol`；**两次「假绿」后立变异测试规** | 判据 **5/5 + 5/5 绿** ｜ **变异测试 5 次全红**（摘 `raise` / 去 `frozen` / 加 `runtime_checkable` / `__exit__` 恒 True / 恒 False）｜ 官方查证 **2 页**（dataclasses / typing）｜ Python 册 **7 → 8 章（+57 行）** ｜ 回访 **32 → 37** ｜ 索引对账 **练习 10 == 10 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
+
 （每天收工后更新）
 
 ## 沉淀笔记
