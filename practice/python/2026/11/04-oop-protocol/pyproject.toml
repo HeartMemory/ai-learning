@@ -1,0 +1,15 @@
+[project]
+name = "oop-protocol-basics"
+version = "0.1.0"
+description = "S0：OOP 与协议 —— dataclass 本体 / __post_init__ 校验 / default_factory / frozen / Protocol"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文注释 / docstring 里的全角标点是刻意的，不算"易混淆字符"（RUF001/002/003 专治全角）
+ignore = ["RUF001", "RUF002", "RUF003"]
