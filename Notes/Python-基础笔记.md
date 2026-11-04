@@ -794,6 +794,62 @@ return [task_a.result(), task_b.result()]
 
 ---
 
+## 第 8 章 · OOP 与协议：dataclass / Protocol / `__dunder__`（2026-11-04）
+
+### 8.1 `@dataclass` = 代码生成器，不是校验器
+
+- **它只干一件事：按字段顺序生成方法**。返回的是**同一个类**（`slots=True` 除外）。生成物：`__init__` / `__repr__` / `__eq__` 默认开；`__lt__` 家族要 `order=True`；`__hash__` 看条件；`__setattr__` 由 `frozen=True` 注入。
+- **C# 对照**：`@dataclass` ≈ `record`（干掉 `Equals` / `GetHashCode` / `ToString` 那一坨）；C# 编译器做，Python 运行时做。
+- ⭐ **除 `ClassVar` / `InitVar` 两处例外，完全不检查注解里写的类型**。`Plain(name=123)` 在 CPython **3.14.8 实测构造成功**，`repr` 出来是 `name=123`。
+- **两套门要分清**：① 注解本身（没人管）→ ② **静态检查器**（Pylance / Pyright / mypy 读注解**报红**，但只是提示）→ ③ **运行时**（解释器不管，**只有你自己写的校验能拦**）。编辑器红字与"能不能跑"是两层，互不决定。
+- `dataclass` 唯一的"静态错误"是**默认值顺序**：无默认值字段不能跟在有默认值字段后面（`TypeError`）。
+
+### 8.2 `__post_init__` 是唯一的校验钩子
+
+- 生成的 `__init__` **末尾**会调 `self.__post_init__()`；**自己写了 `__init__` 或 `init=False` 时不会调**。`replace()` 内部走 `__init__` ⇒ 也会执行。
+- **顺序：先校验、后派生**。反了就会拿非法输入算出"看着挺正常"的脏值（`-1 + 58 = 57`），属于静默 bug。
+- **派生字段用 `field(init=False)`**：不进 `__init__` 参数表 ⇒ 调用方**传不进来**（`TypeError: takes 2 positional arguments but 3 were given`），签名层面堵死"`total` 与两个分量自相矛盾"这种对象。代价：**没默认值 + 没在 `__post_init__` 赋值 ⇒ 属性不存在**，构造成功、第一次读（`repr`）才 `AttributeError`。
+- ⭐ **库里的校验必须 `raise`，不能 `assert`**：`python -O` 会把**所有** `assert` 语句整条删掉（实测 `-O` 下 `assert False` 静默消失）⇒ 用 assert 写的校验在优化模式里等于没有。练习里的**判据**用 assert 没问题，那是开发期自检。
+- **可变默认值必须 `field(default_factory=list)`**：默认值存在**类属性**上，生成的 `__init__` 等价于 `def __init__(self, xs=xs)` ⇒ 所有实例共享同一个对象（与第 3 章默认参数陷阱同根）。**3.11 起判据改成「不可哈希即禁」**（近似"可变"），在**装饰时**抛 `ValueError`，不是实例化时。`default` 与 `default_factory` **不能同时给**。
+- **`default_factory` = 缺省值工厂，与"输入类型"无关**：只在**没传值**时调一次（实测显式传值时计数不增）；没有任何类型强制（传 `tuple` / `None` 都行，报应发生在用 `list` 方法那一刻）。
+- **`frozen=True` 是伪不可变**：注入 `__setattr__` / `__delattr__` ⇒ `FrozenInstanceError`（`AttributeError` 的**子类**，宽 `except` 会先吞掉）。三条边界实测：① **浅冻结**（里面的 `list` 照样 `append`）② `object.__setattr__` **能绕过** ③ `frozen` 只**允许**生成 `__hash__`，字段里塞 `list` 则 `hash()` 照样 `TypeError`。
+- **`frozen` + `eq` ⇒ 自动 `__hash__`**；**可变** dataclass 的 `__hash__` 被置 `None`（能被改的键放进 dict 就永久找不回来）—— **不可变才配当字典键**。
+- **`frozen` 的 `__post_init__` 里赋值要走 `object.__setattr__`**：注入的 `__setattr__` 连自己的 `__init__` 都拦。
+- **给类加必填字段会打破已有调用点**：加 `swallow` 参数必须给默认值，否则原来的无参调用直接 `TypeError`（与 dataclass 加无默认值字段同一个坑）。
+
+### 8.3 `Protocol` = 结构化子类型（形状像就算）
+
+- **C# 的 `interface` 是名义子类型**：必须 `: IClosable` 登记入会。**PEP 544 的 `Protocol` 是结构化子类型**：不用继承、不用 import，被适配的类甚至不知道自己被适配。第三方库的 client 改不了继承链时，这套是唯一出路。
+- ⭐ **默认只在静态检查器里生效**：未加 `@runtime_checkable` 的协议用于 `isinstance` / `issubclass` → **`TypeError`**。
+- **`@runtime_checkable` 只查"成员名在不在"**：`Pretender.close(self, force: bool) -> int` 与协议完全不符，`isinstance` **照样 True**。⇒ 它**不是 validator**。
+- 数据成员（`name: str`）也按"存在"算，**不验类型**；缺了就 False。
+- 其余限制：运行时可检查性**不被子协议继承**；`isinstance` 对协议**明显更慢**（3.12 起改用 `inspect.getattr_static`）；成员在类创建后**运行时"冻结"**（monkey-patch 不影响判定）；3.15 起"继承自可检查协议但自己没加装饰器"的用法**已弃用**（3.20 抛 `TypeError`）。
+- **优先用标准库现成协议**：`collections.abc` 的 `Sized` / `Iterable` / `Iterator` / `Callable` 就是预置协议；`typing.Callable` 等旧别名已 deprecated。
+
+### 8.4 `__dunder__` = 把类接进语言协议
+
+- **特殊方法由类型决定**：`len(x)` 找 `type(x).__len__`，不是"调用 `x.len()`"。实现对应 dunder，`len` / `for` / `in` / `with` 直接认它，**不需要继承任何东西**（这与 `Protocol` 是同一套机制的"语言内建版"）。
+- **`__len__` 必须返回非负整数**：返回 `-1` → `ValueError: __len__() should return >= 0`。
+- **`__iter__` 用 `yield` 或 `return iter(...)` 都行**；`yield` 让函数变**生成器函数**（调用时不执行函数体，第一次 `next` 才开始 —— 错误也随之**后移**）。
+- **可迭代 vs 迭代器在类里的分工**：`__iter__` 每被调用一次就**新建**生成器 ⇒ 实例可重复迭代；若把迭代器缓存到 `self._it`，第二次就是 `[]`（第 6 章那条"迭代器一次性"的实战后果）。
+- ⭐ **`__exit__` 的返回值决定吞不吞**：`with` 的等价展开里是 `except: if not exit_(manager, *sys.exc_info()): raise` ⇒ **真值吞、假值放行**。正常退出时三个参数全是 `None`（`__exit__` 仍会被调用）。
+- **异常三联**：`exc_type` 是**类**（不是实例）、`exc` 是**实例**、`tb` 是 `types.TracebackType`（`traceback.format_exception(exc_type, exc, tb)` 要用它）。声明用 `BaseException` 而非 `Exception` —— `KeyboardInterrupt` / `SystemExit` 也是 `BaseException` 的子类，`with` 里按 Ctrl+C 一样会传进来。
+- **`...`（`Ellipsis`）是真值**：`__exit__` 返回 `...` ⇒ **吞掉所有异常**。协议里写 `...` 是"只有形状"的约定；**实现类里留 `...` 就是静默 bug**。`def f() -> int: ...` 实际返回 `None`（注解连自己都不保证）。
+- **3.14 起注解不需要引号**：PEP 649 延迟求值 ⇒ `-> "Self"` 这类前向引用写法被 ruff **UP037** 强制去掉。
+
+### 8.5 判据（可复测 · 汇总）
+
+1. `Plain(name=123)` / `P(name=123, n=0)` → **构造成功**（注解不校验）
+2. `TokenUsage(38, 58).total_tokens == 96`；`TokenUsage(-1, 0)` → `ValueError`
+3. `@dataclass class Bad: xs: list = []` → **装饰时** `ValueError: mutable default ... not allowed`
+4. `frozen` 实例赋值 → `FrozenInstanceError`；同值两实例进 `set` 只剩 **1** 个
+5. 无 `@runtime_checkable` 的协议 `isinstance` → `TypeError`；有装饰器时**签名错的类也通过**
+6. `Counter(3)`：`len == 3`、`list == [1, 2, 3]`、`2 in` 真 / `9 in` 假
+7. `__exit__` 返回 True ⇒ `with` 体内异常被吞（后续语句照跑）；返回 False ⇒ 异常放行
+8. `python -O -c 'assert False; print("照跑")'` → **print 执行**（assert 被剥掉）
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。
@@ -803,6 +859,7 @@ return [task_a.result(), task_b.result()]
 | S0 | 4 | ✅ 已展开为 **第 4 章**（2026-10-30）；`Counter` / `defaultdict` **用到时再补** |
 | S0 | 缺口 | ✅ 已展开为 **第 6 章**（2026-11-02）：推导式 / 切片 / 可迭代与迭代器 —— 原计划未单列，属 10-31 复盘补的缺口 |
 | S0 | — | ✅ 已展开为 **第 7 章**（2026-11-03）：httpx / 一次 HTTPS 请求的账单 / 并发抓取 —— 原排期 11-05，随交付物地基提前 2 天落地 |
+| S0 | D4 | ✅ 已展开为 **第 8 章**（2026-11-04）：OOP 与协议 —— dataclass 生成物 / `__post_init__` 校验 / Protocol 结构化子类型 / `__dunder__` 接进语言协议 |
 | S0 | 5 | 函数进阶：`*args / **kwargs`、闭包、装饰器（对照 C# 委托 / Attribute） |
 | S0 | 6 | 模块与包：`import` 机制、`__name__`、虚拟环境 |
 | S0 | 7 | ✅ 已展开为 **第 5 章**（2026-10-31）：`async/await` 与 C# `Task` 的异同、事件循环。⚠️ 正文章号按**实际学习顺序**编（第 5 章 ↔ 本表编号 7），两者不再一一对应 |
