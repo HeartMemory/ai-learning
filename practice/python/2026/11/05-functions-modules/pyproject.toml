@@ -1,0 +1,15 @@
+[project]
+name = "functions-modules-basics"
+version = "0.1.0"
+description = "S0：函数与模块 —— 装饰器 / 闭包晚绑定 / *args **kwargs 透传 / functools.wraps / import 与 sys.modules"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文注释 / docstring 里的全角标点是刻意的，不算"易混淆字符"（RUF001/002/003 专治全角）
+ignore = ["RUF001", "RUF002", "RUF003"]
