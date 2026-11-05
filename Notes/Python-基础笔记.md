@@ -850,6 +850,100 @@ return [task_a.result(), task_b.result()]
 
 ---
 
+## 第 9 章 · 装饰器与闭包：`@deco` 是 def 时的一次函数调用（2026-11-05）
+
+### 9.1 `@deco` 的真相
+
+- ⭐ **`@deco` 只是 `f = deco(f)` 的语法糖**，发生在 **`def` 语句执行的那一刻**，不是调用时。`@a @b def f()` ≡ `f = a(b(f))`（自下而上套）。
+- **装饰器 = 交出一个"替身"**：收一个函数，返回另一个函数。合格替身三件事：**接住任意参数 → 展开传给真身 → 把返回值交回去**（外加：不许吞异常）。
+- **`timer(add)` 不调用 `add`**：它只负责造替身（返回 `timer.<locals>.wrapper`）；`timer(add)(2, 3)` 第二段括号才真正调真身。判据 4/4 里两条计时行都出现在第二段。
+- 与 C# 对照：`[Attribute]` 是**元数据**（贴标签，运行时不执行代码）；Python 装饰器是**真调用**（会执行、能改返回值）。同名不同物种。
+
+### 9.2 `*args` / `**kwargs`：定义处打包，调用处拆包
+
+| 位置 | 写法 | 星号含义 |
+|---|---|---|
+| 定义处 | `def wrapper(*args, **kwargs)` | **收**：多出来的位置参 → tuple；关键字参 → dict |
+| 调用处 | `fn(*args, **kwargs)` | **拆**：tuple 摊成位置参；dict 摊成关键字参 |
+
+- 注解说的是**每个元素**的类型：`*args: Any` ≈ `args: tuple[Any, ...]`；`**kwargs: Any` ≈ `kwargs: dict[str, Any]`。运行时一样不检查。
+- 实测：`collect(2, 3, scale=10)` → `args=(2, 3)`（tuple）、`kwargs={'scale': 10}`（dict）。
+- 参数顺序：`def f(a, b=1, *args, sep="-", **kwargs)` —— `*args` 之后只能是**仅关键字参数**，`**kwargs` 必须最后。
+- C# 对照：`params object[]` 只能收位置参；`**kwargs` **没有**对应语法。
+
+### 9.3 `functools.wraps`：给替身缝工牌
+
+- `wraps(fn)` **返回一个装饰器**（`partial(update_wrapper, wrapped=fn, ...)`），所以必须带 `(fn)`：少了括号，`wrapper` 会被替换成 `partial` 对象，**定义时不报错、调用时才炸**。
+- 它做的事：**复制** `WRAPPER_ASSIGNMENTS`（`__module__` / `__name__` / `__qualname__` / `__doc__` / `__annotate__` / `__type_params__`）+ **update** `__dict__` + **自动添加 `__wrapped__`**。
+- ⭐ **`inspect.signature` 并没有"复制签名"**：它是顺着 `__wrapped__` 找到真身再读（`follow_wrapped=True` 默认）。所以四项元数据里后两项成立，靠的是这条绳子。
+- 不缝工牌的后果：日志全是 `Call to wrapper`、traceback 指向 `wrapper`、`help()` 没文档、**FastAPI / pytest 这类靠签名做事的库直接懵**。
+- ⚠️ **版本差异（3.14.8 实测）**：`WRAPPER_ASSIGNMENTS` 里是 **`__annotate__`**，不是文档常写的 `__annotations__`（PEP 649 起注解惰性求值）。⇒ 文档落后于库源码时，**以 `Lib/functools.py` + 实测输出为准**。
+
+### 9.4 闭包：记住的是**变量**，不是值的快照
+
+- **晚绑定**：内层函数带走的是外层作用域（cell），调用时才去读。循环里建 3 个 `lambda x: x * i`，循环结束 `i` 停在 3 ⇒ 三个都返回 `6`（判据实测 `[6, 6, 6]`）。
+- **解药 = 当场拍照**：`lambda x, i=i: x * i` —— 默认参数在**定义时**求值（第 3 章那条的同一机制）⇒ `[2, 4, 6]`。
+- **ruff B023 会自动抓这个坑**（"Function definition does not bind loop variable"）：刻意保留做对照时写 `# noqa: B023` 并注明意图。
+- **列表里必须装"函数"，不是"调用结果"**：`append(inner(i))` / `append((lambda x: x * i)())` 会立刻求值 ⇒ `'int' object is not callable`。
+- **观测"何时发生"要一条时间线**：`EVENTS: list[str]` 在模块级共享，`record` 在 `def wrapper` **之前** append 一笔（装饰时）、在 wrapper **里面** append 另一笔（调用时）；判据先 `clear()` 再断言，避免上一次的残留。
+
+### 9.5 判据（可复测 · 汇总）
+
+1. `timer(add)` 返回替身、**真身未执行**；`timer(add)(2, 3)` → `5`，`timer(add)(2, 3, scale=10)` → `50`（关键字参数穿过替身）
+2. 替身里写成 `fn(*args)`（漏 `**kwargs`）⇒ `scale` 悄悄回默认值 1，**静默返回 5**；只收 `*args` 不收 `**kwargs` ⇒ 立刻 `TypeError`
+3. `timer(add).__name__ == "wrapper"` vs `timer_wrapped(add).__name__ == "add"`；后者 `__wrapped__ is add`
+4. `inspect.signature` 两边不同：裸版含 `kwargs`、盖牌版含 `scale`
+5. `make_multipliers(3)` 各传 2 → `[6, 6, 6]`；`snapshot_by_default(3)` → `[2, 4, 6]`
+6. `@record` 定义函数后**不调用** ⇒ `EVENTS` 里已有"装饰"那笔、没有"调用"那笔
+
+---
+
+## 第 10 章 · 异常链与 `pathlib`：对外换说法，对内留线索（2026-11-05）
+
+### 10.1 `raise ... from` 到底改了哪几个属性
+
+同一段 `json.loads` 包装代码的**三个版本**，只差 `raise` 后半句：
+
+| 写法 | `__cause__` | `__context__` | `__suppress_context__` | traceback |
+|---|---|---|---|---|
+| `raise New from exc` | **原异常** | 原异常 | **True** | 两段，中间 "direct cause" |
+| `raise New`（裸） | `None` | **原异常** | `False` | 两段，中间 "During handling" |
+| `raise New from None` | `None` | **原异常（仍在）** | **True** | **一段** |
+
+- `from` 后面必须是**异常或 `None`**；设置 `__cause__` 会**隐式**把 `__suppress_context__` 置 True。
+- **为什么包装**：库边界上只对外暴露自己的异常类型（`ConfigError`），不把 `json` 的 `JSONDecodeError` 漏给调用方；但调试线索一个字不能丢。
+- `json.JSONDecodeError` 是 **`ValueError` 的子类** ⇒ `except ValueError` 接得住。
+- ⭐ **ruff B904** 专治"`except` 里 raise 不带 from"；**故意**写隐式链时用行内 `# noqa: B904`（写在上一行不生效，诊断挂在 `raise` 那一行）。
+
+### 10.2 `from None` 切的是**显示**，不是记录
+
+- 官方口径：`from None` 在**显示层面**替换旧异常，但旧异常**仍留在 `__context__`** 供调试 —— 判据实测：`__cause__ is None`、`__suppress_context__ is True`、`__context__ is not None` 三者同时成立。
+- ⇒ 想看原始错误就去翻 `__context__`，不是"没了"。
+
+### 10.3 `pathlib`：路径是对象，不是字符串
+
+- `root / "notes" / "day.txt"` 等价于 `root.joinpath("notes", "day.txt")`（实测 `True`）；`/` **左结合**、每次产生**新** Path（`Path` 不可变，`root` 不变）。
+- 好处：分隔符交给系统（Windows `\`、Linux `/`），不再手拼。
+- **`write_text` 不建目录**：目录不在 ⇒ `FileNotFoundError`，得先 `path.parent.mkdir(parents=True, exist_ok=True)`。`exist_ok=True` 让判据可重复跑；但**同名路径是文件时照样 `FileExistsError`**。
+- `write_text` 返回**字符数**（`"中文abc"` → `5`，UTF-8 下实写 9 字节）；`read_text` / `write_text` 内部就是 `with open(...)`，关文件不用你管。
+- **绝对路径重置**：`root / "/abs"` → `<盘符>:\abs` —— 前面整段被丢，但 Windows 上**盘符保留**。
+
+### 10.4 `encoding` 的判据必须下沉到**字节层**
+
+- 同机往返时默认编码读写一致 ⇒ **"不给 `encoding`"照样绿**（实测变异没变红）。它防的是**跨环境**（Linux 服务端 UTF-8）与 GBK 编不了的字符。
+- 能真正守住的写法：`assert path.read_bytes() == text.encode("utf-8")` —— 加了之后，"不给 encoding"与"用 gbk 写"两种变异**都变红**。
+- **变异测试自身的两条教训**：① `text.upper()` 对中文无效 ⇒ 那是**无效变异**（改动没改变行为，红不了是正常）；② 判据看不见的行为差异，要先想"差异在哪一层"，再决定断言写哪一层。
+
+### 10.5 判据（可复测 · 汇总）
+
+1. `load_config(BAD_TEXT)`：抛 `ConfigError`，`__cause__` 是 `ValueError`，`__suppress_context__ is True`
+2. 裸 `raise`：`__cause__ is None`、`__context__` 非空、`__suppress_context__ is False`
+3. `from None`：`__cause__ is None`、`__suppress_context__ is True`、**`__context__` 非空**
+4. `roundtrip(root, "中文测试")`：读回一致；`path == root / "notes" / "day.txt"`；`path.parent.name == "notes"`
+5. `path.read_bytes() == text.encode("utf-8")`；`(root / "/abs").name == "abs"`
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。
@@ -860,8 +954,9 @@ return [task_a.result(), task_b.result()]
 | S0 | 缺口 | ✅ 已展开为 **第 6 章**（2026-11-02）：推导式 / 切片 / 可迭代与迭代器 —— 原计划未单列，属 10-31 复盘补的缺口 |
 | S0 | — | ✅ 已展开为 **第 7 章**（2026-11-03）：httpx / 一次 HTTPS 请求的账单 / 并发抓取 —— 原排期 11-05，随交付物地基提前 2 天落地 |
 | S0 | D4 | ✅ 已展开为 **第 8 章**（2026-11-04）：OOP 与协议 —— dataclass 生成物 / `__post_init__` 校验 / Protocol 结构化子类型 / `__dunder__` 接进语言协议 |
-| S0 | 5 | 函数进阶：`*args / **kwargs`、闭包、装饰器（对照 C# 委托 / Attribute） |
-| S0 | 6 | 模块与包：`import` 机制、`__name__`、虚拟环境 |
+| S0 | D5 | ✅ 已展开为 **第 10 章**（2026-11-05）：异常链 `raise ... from` 三态 / `pathlib` 读写与 `encoding` 的字节层判据 |
+| S0 | 5 | ✅ 已展开为 **第 9 章**（2026-11-05）：装饰器 / 闭包 / `*args·**kwargs` / `functools.wraps` —— ⚠️ 只覆盖到"函数作为值"这半边，**`import` 与模块查找未覆盖**（归下面的编号 6，仍未展开） |
+| S0 | 6 | ⬜ **仍未展开**：模块与包 —— `import` 机制、`sys.modules` 缓存、`__name__`、虚拟环境 |
 | S0 | 7 | ✅ 已展开为 **第 5 章**（2026-10-31）：`async/await` 与 C# `Task` 的异同、事件循环。⚠️ 正文章号按**实际学习顺序**编（第 5 章 ↔ 本表编号 7），两者不再一一对应 |
 | S0 | 8 | httpx 并发抓取 + 存 JSON（S0 交付物） |
 | S0 | 9 | pydantic 数据校验（S1 结构化输出的前置） |
