@@ -1,8 +1,8 @@
 # AI 主线学习打卡（智能体 / 大模型应用）
 
 > **2026-10-30 起，本仓库是 AI 主线的唯一学习记录**：代码 + 打卡 + 复盘 + 笔记全在这里。
-> 目标：**2027 暑假实习**，双方向投递 —— A 版简历（AI 应用 / Agent 岗）+ B 版简历（游戏公司 AI 岗）。
-> 学习方法沿用：每日打卡 → 复盘 → 笔记 → 按主题提交；**判据要有实测数字**。
+> 目标：**先学会 AI（原理）→ 智能体能力 → 应用（游戏）**。不设投递死线，优先级 = **学会 > 交付**。
+> 节奏：一次只做一关，**不设每日配额**（我自己决定学多少）；判据要有实测数字。
 
 ## 目录结构
 
@@ -11,7 +11,7 @@ ai-learning/
 ├── practice/          # 小练习（两个桶：python/ 语言层 · ai/ LLM 层）
 ├── projects/          # 交付物（能跑、有 README、有实测数字）
 ├── Notes/             # 每日复盘（YYYY/MM/DD.md）+ Python / AI-Agent 两册笔记
-└── README.md          # 本文件（打卡表 + 阶段 + 纪律）
+└── README.md          # 本文件（打卡表 + 关卡 + 纪律）
 ```
 
 ## 练习 vs 交付物
@@ -28,18 +28,23 @@ ai-learning/
 | `practice/python/` | 只跑标准库 / 只教 **Python 语言本身** |
 | `practice/ai/` | 涉及 **模型 / token / prompt / 工具调用 / RAG / 评测** |
 
-## 阶段与交付物
+## 关卡与交付物
 
-| 阶段 | 内容 | 交付物 | 状态 |
+> 关卡是**唯一进度单位**。过关 = 判据全绿；允许插队与降级通过，但要在 `HANDOVER.md` 记一行「跳过了什么」。
+> **应用段暂不规划**，等具体内容（老师给的 / 游戏那边真需要做的）再单独排。
+
+| 关 | 内容 | 交付物 | 状态 |
 |---|---|---|---|
-| **S0** | Python 主线（语法差异 / 类型注解 / async / httpx / pydantic） | 并发抓取 + 存 JSON 的小工具 | 🔄 进行中 |
-| **S1** | LLM API：流式 / 结构化输出 / token 与成本 / prompt | `projects/llm-cli/` | ⬜ |
-| **S2** | **手写 Agent（禁用框架）**：ReAct / trace / 工具 schema / **工具鲁棒性** | `projects/mini-agent/` | ⬜ |
-| **S3** | RAG + 评测：切分 / embedding / 检索 / **失败归因三分法** | `projects/rag-notes/` | ⬜ |
-| **S3.5** | **Agent 安全与红队**：提示注入 / 间接注入 / 工具越权 / 沙箱 | `projects/redteam-report/` | ⬜ |
-| **S4** | LangGraph / MCP server / 观测 / FastAPI + Docker | `projects/mcp-server/` | ⬜ |
-| **S5** | 旗舰项目（游戏场景 Agent，双简历通用） | `projects/game-agent/` | ⬜ |
-| 并行 | 底层原理：手敲一遍 nanoGPT（每周 1-2h） | `practice/python/nanogpt/`（长期，不按日归档） | ⬜ |
+| **L1** | 词与概率：char-level bigram、交叉熵、softmax | `practice/ai/…-bigram` | ⬜ |
+| **L2** | 注意力：单头 attention → 最小 Transformer block | `practice/python/nanogpt/`（长期） | ⬜ |
+| **L3** | 训练工程：五种失败症状对照（lr / warmup / 过拟合 / batch） | L2 的对照记录 | ⬜ |
+| **L4** | 调用与可控：流式 / 结构化输出 / token 成本 / prompt | `projects/llm-cli/` | ⬜ |
+| **L5** | **工具与循环：手写 Agent（禁用框架）** | `projects/mini-agent/` | ⬜ |
+| **L6** | 检索与 RAG：切分 / embedding / 检索 / 失败归因三分法 | `projects/rag-notes/` | ⬜ |
+| **L7** | 评测与安全：eval 一套 + 提示注入红队 | `projects/agent-eval/` | ⬜ |
+| **L8** | 微调：QLoRA 把输出改成指定 JSON 格式 | `projects/qlora-format/` | ⬜ |
+| 应用 | **空缺**，等具体内容再规划 | — | — |
+| 已完成 | S0 Python 语言层（12 个练习） | `practice/python/` | ✅ |
 
 ## 环境要求与本地运行
 
@@ -55,10 +60,10 @@ ai-learning/
 ## 打卡规则
 
 1. **提交信息**：`MM-DD: [AI] 描述`（算法用 `[算法]`、笔记用 `[笔记]`、打卡用 `[打卡]`）
-2. **每日收尾必做**：更新本文件打卡行 → 写 `Notes/YYYY/MM/DD.md` → 维护两册笔记 → 提交
+2. **学完就收尾**：更新打卡行 → 更新 `HANDOVER.md` §六 关卡状态 → 写 `Notes/YYYY/MM/DD.md` → 维护两册笔记 → 提交。**没学的那天什么都不记**（不写「今日无」、不补空档、不追连续天数）
 3. **判据要有数字**：token / 耗时 / 通过率 / 成本，四者至少填一个；没有就写「今日无」
-4. **算法（2026-10-30 起）**：**暂停刷题**，改为「**随用随学**」—— AI 项目用到哪个算法就当天补哪个，记进笔记；**2027-02 投递前恢复集中刷题约 4 周**
-5. **硬纪律**：`S2 之前禁止引入 langchain / langgraph`（先会手写）；**key 永不入库**
+4. **算法**：**暂停刷题**，改为「**随用随学**」—— 用到哪个算法就当天补哪个，记进笔记；**恢复集中刷题的时间我自己定**
+5. **硬纪律**：`L5 手写 mini-agent 完成前禁止引入 langchain / langgraph`（先会手写）；**key 永不入库**
 6. **交接件** `HANDOVER.md` 含个人信息，已 gitignore，**不上传**
 
 ## 打卡进度
