@@ -1,0 +1,20 @@
+[project]
+name = "bigram"
+version = "0.1.0"
+description = "L1 词与概率：char-level bigram 计数 → 交叉熵 → softmax"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文注释 / docstring 里的全角标点是刻意的，不算易混淆字符
+ignore = ["RUF001", "RUF002", "RUF003"]
