@@ -33,18 +33,18 @@ ai-learning/
 > 关卡是**唯一进度单位**。过关 = 判据全绿；允许插队与降级通过，但要在 `HANDOVER.md` 记一行「跳过了什么」。
 > **应用段暂不规划**，等具体内容（老师给的 / 游戏那边真需要做的）再单独排。
 
-| 关 | 内容 | 交付物 | 状态 |
-|---|---|---|---|
-| **L1** | 词与概率：char-level bigram、交叉熵、softmax | `practice/ai/…-bigram` | ⬜ |
-| **L2** | 注意力：单头 attention → 最小 Transformer block | `practice/python/nanogpt/`（长期） | ⬜ |
-| **L3** | 训练工程：五种失败症状对照（lr / warmup / 过拟合 / batch） | L2 的对照记录 | ⬜ |
-| **L4** | 调用与可控：流式 / 结构化输出 / token 成本 / prompt | `projects/llm-cli/` | ⬜ |
-| **L5** | **工具与循环：手写 Agent（禁用框架）** | `projects/mini-agent/` | ⬜ |
-| **L6** | 检索与 RAG：切分 / embedding / 检索 / 失败归因三分法 | `projects/rag-notes/` | ⬜ |
-| **L7** | 评测与安全：eval 一套 + 提示注入红队 | `projects/agent-eval/` | ⬜ |
-| **L8** | 微调：QLoRA 把输出改成指定 JSON 格式 | `projects/qlora-format/` | ⬜ |
-| 应用 | **空缺**，等具体内容再规划 | — | — |
-| 已完成 | S0 Python 语言层（12 个练习） | `practice/python/` | ✅ |
+| 关 | 内容 | 判据（过关 = 全绿） | 交付物 | 状态 |
+|---|---|---|---|---|
+| **L1** | 词与概率：char-level bigram、交叉熵、softmax | ① **计数守恒**（总对数 = `len-1`，且每个 context 行和 = 该字出现次数）② **交叉熵严格序** `log2(V) > CE_unigram > CE_bigram`（bits/char，三个数都报），留出集上 bigram CE 必须升高 ③ **softmax 平移不变**（差 < 1e-12）+ 溢出对照（`[1000, 0]` 直算抛 `OverflowError`，减 max 后正常）④ **平滑必需**：未见 bigram 使 CE → `inf`，add-k 后变有限可比 | `practice/ai/2026/11/16-bigram` | 🟡 |
+| **L2** | 注意力：单头 attention → 最小 Transformer block | 待拆 | `practice/python/nanogpt/`（长期） | ⬜ |
+| **L3** | 训练工程：五种失败症状对照（lr / warmup / 过拟合 / batch） | 待拆 | L2 的对照记录 | ⬜ |
+| **L4** | 调用与可控：流式 / 结构化输出 / token 成本 / prompt | 待拆 | `projects/llm-cli/` | ⬜ |
+| **L5** | **工具与循环：手写 Agent（禁用框架）** | 待拆 | `projects/mini-agent/` | ⬜ |
+| **L6** | 检索与 RAG：切分 / embedding / 检索 / 失败归因三分法 | 待拆 | `projects/rag-notes/` | ⬜ |
+| **L7** | 评测与安全：eval 一套 + 提示注入红队 | 待拆 | `projects/agent-eval/` | ⬜ |
+| **L8** | 微调：QLoRA 把输出改成指定 JSON 格式 | 待拆 | `projects/qlora-format/` | ⬜ |
+| 应用 | **空缺**，等具体内容再规划 | — | — | — |
+| 已完成 | S0 Python 语言层（12 个练习） | 判据全绿 + 变异测试全红 | `practice/python/` | ✅ |
 
 ## 环境要求与本地运行
 
@@ -81,6 +81,7 @@ ai-learning/
 
 | 11-04 周三 | **S0·OOP 与协议**（D4，S0 语言层收口）：`@dataclass` 生成物与「注解不校验」（**静态门 vs 运行时门**三分层）+ `__post_init__` 校验与 `field(init=False)` 派生字段、`default_factory`（装饰时 `ValueError`）、`frozen`（浅冻结 / 可绕过 / 可哈希边界）；`Protocol` 三件事（默认静态 / `runtime_checkable` 只查成员存在 / 数据成员同标准）+ `__len__` / `__iter__` / `__enter__` / `__exit__`；练习 `practice/python/2026/11/04-oop-protocol`；**两次「假绿」后立变异测试规** | 判据 **5/5 + 5/5 绿** ｜ **变异测试 5 次全红**（摘 `raise` / 去 `frozen` / 加 `runtime_checkable` / `__exit__` 恒 True / 恒 False）｜ 官方查证 **2 页**（dataclasses / typing）｜ Python 册 **7 → 8 章（+57 行）** ｜ 回访 **32 → 37** ｜ 索引对账 **练习 10 == 10 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 | 11-05 周四 | **S0 收口两块**：① **D3 装饰器与闭包** —— `@timer` 在 def 时执行（`timer(add)` 不调真身）、`*args/**kwargs` 透传、返回值透传、异常不吞、`functools.wraps` 六属性 + `__wrapped__`、闭包晚绑定 vs 默认参数钉死、`EVENTS` 观测"装饰时 vs 调用时"；练习 `practice/python/2026/11/05-functions-modules` ② **D5 异常链 + pathlib** —— `raise ... from` 三态、`from None` 切显示不切记录、`Path` 的 `/` 与 `read_text`/`write_text`、encoding 判据下沉字节层；练习 `practice/python/2026/11/05-exceptions-pathlib` | 判据 **4/4 + 2/2 = 6/6 绿** ｜ **变异 13/13 全红**（另有 1 次**无效变异**被识别：`upper()` 对中文无影响）｜ 官方查证 **8 页** ｜ 版本差异实证 1 条（3.14 `WRAPPER_ASSIGNMENTS` 是 `__annotate__`）｜ Python 册 **8 → 10 章（+95 行）** ｜ 回访 **37 → 40** ｜ 索引对账 **练习 12 == 12 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
+| 11-16 周一 | **L1 关卡 1：char-level bigram → 条件概率表**（练习 `practice/ai/2026/11/16-bigram`，0 依赖）：计数守恒（总对数 / 行和自证 / 键集合三条）、`P(next\|ctx)` 归一与「真的是条件」（条件分布 vs 全局分布）、未见 context 必须返回 `{}`；顺带纠正三处证据/阈值问题（`set` 前缀不能当「顺序变了」的证据、`0.10` 阈值是拍脑袋、断言消息打印 180 个键 = 不可读） | 判据 **2/2 绿** ｜ **变异 5/5 全红**（按 next 聚合 / 忽略 context / 删守卫 / 负概率 / 凭空加键）｜ 421 对 / **350** 种 / V **180** / 行和最大 `'，'`=**28** ｜ `P(包\|面)`=**1.0** vs 全局 **0.0213**（差 **0.9787**）｜ 官方查证 **4 页** ｜ AI 册 **4 → 5 章** · Python 册 **10 → 11 章** ｜ 回访 **40 → 43** ｜ 索引对账 **练习 13 == 13 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 
 （每天收工后更新）
 
