@@ -35,7 +35,7 @@ ai-learning/
 
 | 关 | 内容 | 判据（过关 = 全绿） | 交付物 | 状态 |
 |---|---|---|---|---|
-| **L1** | 词与概率：char-level bigram、交叉熵、softmax | ① **计数守恒**（总对数 = `len-1`，且每个 context 行和 = 该字出现次数）② **交叉熵严格序** `log2(V) > CE_unigram > CE_bigram`（bits/char，三个数都报），留出集上 bigram CE 必须升高 ③ **softmax 平移不变**（差 < 1e-12）+ 溢出对照（`[1000, 0]` 直算抛 `OverflowError`，减 max 后正常）④ **平滑必需**：未见 bigram 使 CE → `inf`，add-k 后变有限可比 | `practice/ai/2026/11/16-bigram` | 🟡 |
+| **L1** | 词与概率：char-level bigram、交叉熵、softmax | ① **计数守恒**（总对数 = `len-1`，且每个 context 行和 = 该字出现次数）② **交叉熵严格序** `log2(V) > CE_unigram > CE_bigram`（bits/char，三个数都报），留出集上 bigram CE 必须升高 ③ **softmax 平移不变**（差 < 1e-12）+ 溢出对照（`[1000, 0]` 直算抛 `OverflowError`，减 max 后正常）④ **平滑必需**：未见 bigram 使 CE → `inf`，add-k 后变有限可比 | `practice/ai/l1-bigram` | 🟡 |
 | **L2** | 注意力：单头 attention → 最小 Transformer block | 待拆 | `practice/python/nanogpt/`（长期） | ⬜ |
 | **L3** | 训练工程：五种失败症状对照（lr / warmup / 过拟合 / batch） | 待拆 | L2 的对照记录 | ⬜ |
 | **L4** | 调用与可控：流式 / 结构化输出 / token 成本 / prompt | 待拆 | `projects/llm-cli/` | ⬜ |

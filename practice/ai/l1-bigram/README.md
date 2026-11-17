@@ -1,5 +1,7 @@
-# 2026-11-16-bigram —— L1 词与概率（char-level bigram → 交叉熵 → softmax）
+# l1-bigram —— L1 词与概率（char-level bigram → 交叉熵 → softmax → 平滑）
 
+> **起 2026-11-16（关卡 1）** —— 关卡型目录：跨天推进，不按天新开子目录，
+> 四关按「步」分文件（`bigram.py` → `entropy.py` → `softmax.py` → `smooth.py`）。
 > 目的：把「语言模型 = 给下一个字打分」这句话，落到能跑、能报数字的最小实现上。
 > 不是交付物（`projects/` 才是），是 L1 的练习目录。
 > 0 依赖、**0 次模型调用（0 token）** —— 全部标准库，不需要 `.env`。
@@ -33,7 +35,7 @@
 ## 怎么跑
 
 ```powershell
-cd practice/ai/2026/11/16-bigram
+cd practice/ai/l1-bigram
 uv sync
 uv run python bigram.py          # 全绿后：判据 2/2 绿
 uv run ruff check .
