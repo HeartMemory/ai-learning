@@ -1026,6 +1026,79 @@ return [task_a.result(), task_b.result()]
 
 ---
 
+## 第 12 章 · 空容器判空、`pairwise` 与「循环里改的到底是谁」（2026-11-17）
+
+### 12.1 判空：`== 0` 是错的，`not x` 才对
+
+| 写法 | 结果 | 说明 |
+|---|---|---|
+| `[] == 0` | **`False`** | list 与 int 比较恒不等 —— 守卫写了等于没写 |
+| `not []` | `True` | 空容器的真值就是 `False`（`len == 0`） |
+| `len([]) == 0` | `True` | 等价写法，啰嗦但明确 |
+
+实测事故：`if pairs == 0: return nan` 守卫失效 ⇒ 空串/单字一路走到 `0.0 / 0` → `ZeroDivisionError`，
+而重构前是 `nan`。**这类 bug 编译器不报、ruff 不报、只在边界输入上炸。**
+
+顺带：`{}` / `set()` / `''` / `0` / `0.0` / `None` / `False` 全是假值；但 `float('nan')` 是**真值**（`bool(nan)` 为 `True`）。
+
+### 12.2 `itertools.pairwise`：相邻对，不用自己写下标
+
+```python
+list(itertools.pairwise('abcd'))   # [('a','b'), ('b','c'), ('c','d')]  —— n-1 个
+list(zip('abcd', 'abcd'[1:]))      # 同义（3.10 之前的手写版）
+```
+
+| 事实 | 后果 |
+|---|---|
+| 返回**迭代器**，不是 list | `len()` → `TypeError`；遍历第二次是**空的**（一次性） |
+| 天生 n−1 个 | 「第一个字没有上下文」由结构保证，`len(s)-1` 不用自己算 |
+| 没有下标 | 「分母算错 ⇒ `IndexError`」这类 bug 从结构上消失 |
+| 空串 / 单字 → `[]` | 调用方必须自己处理 `len == 0` |
+
+### 12.3 循环里「改」的到底是谁
+
+`for x in obj` 内部是 `iter(obj)`，**永远抓源对象，不会自动复制**。安不安全取决于**类型可变性**：
+
+| 类型 | 循环体内「改」 | 对迭代的影响 |
+|---|---|---|
+| `str` / `tuple` / `int` | 只能**重新绑定名字**（`s = s.replace(...)` 造新对象） | 无 —— 迭代器还指着旧对象 |
+| `list` / `dict` / `set` | `remove` / `del` / `pop` 是**原地改** | 游标前移 + 元素左移 ⇒ **跳过元素** |
+
+实测对照：
+
+```python
+lst = ['a','b','b','c']          # 进过循环体的只有 ['a','b','c']（漏掉第二个 b）
+for x in lst:
+    if x == 'b': lst.remove(x)
+
+s, seen = 'abbc', []              # 进过循环体的是 ['a','b','b','c']（4 个全进）
+for ch in s:
+    seen.append(ch)
+    s = s.replace('b','')         # 只是把名字 s 换到新对象上
+```
+
+要「遍历时删」⇒ `for x in list(obj):` / `for k in list(d):`（迭代副本）。
+
+### 12.4 函数签名里的 `*`：关键字参数分隔符
+
+```python
+def f(a, b, *, flag=False): ...
+f(1, 2, True)        # TypeError: takes 2 positional arguments but 3 were given
+f(1, 2, flag=True)   # ✓
+```
+
+它本身不是参数。作用 = 逼调用方写出参数名，防 `f(a, b, True)` 这种「第三个参数是什么鬼」。
+参数绑定发生在**函数体执行之前**，所以即使函数体是 `raise NotImplementedError`，`TypeError` 也先抛。
+
+### 12.5 一个被实测推翻的直觉：大 O 不决定耗时
+
+`str.replace` 逐字删（`O(k·n)`）**0.4 ms** vs Python 层推导式（`O(n)`）**5.8 ms**（8.4 万字符、15 个未见字）。
+
+原因：`str.replace` 是 **C 实现**（搜索 + memcpy），推导式是逐字符解释执行。常数因子可以盖过增长趋势 ——
+只有当 k 逼近 n 时，`O(k·n)` 才翻盘。⇒ 「它复杂度高所以慢」必须实测过再说。
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。
