@@ -13,7 +13,7 @@
 | 1 | 计数 → 条件概率表 | **计数守恒**：`sum(counts.values()) == len(CORPUS) - 1` **且** 每个 context 的行和 == 该字在 `CORPUS[:-1]` 里出现的次数（按 next 聚合会过第一条、炸第二条）｜**归一 + 条件性**：每个 context 满足三条 —— `Σ P == 1.0`（±1e-12）、**后继键集合 == counts 里的真实后继**、**每个值 ≥ 0**（`{'包':1.5,'面':-0.5}` 的和也是 1）；且条件分布 ≠ 全局字符分布 —— **自动挑「出现 ≥3 次且后继唯一」的 context**，断言点质量 `{唯一后继: 1.0}`，并用恒等式 `最大差 == 1 − P_global(唯一后继)`（实测 `0.9787`）。判据里**没有语料字面量、没有阈值** | ✅ 绿（判据 2/2 · 变异 5/5） |
 | 2 | 交叉熵 / 困惑度 | **严格序**：`log2(V) > CE_unigram > CE_bigram`（bits/char，三个数都要报）+ **两路互证**（逐位置 vs 按对/按字频加权，差 < 1e-12）；留出集（后 20%）**默认口径必须 `inf`**，只算见过的对时 **必须升高** —— 稀疏/过拟合的证据；边界：`"axd"`（无可用对）→ `nan`、`""`/单字 → `nan` | ✅ 绿（判据 2/2 · 变异 6/6） |
 | 3 | softmax | **平移不变**：logits 全体加常数 c（`1 / −5 / 100`），输出概率差 < 1e-12；**精确值**（`[log3, log1]` → 0.75、`[log1, log7]` → 0.125，同时钉住**同序**）；**归一 + 正性 + 保序**；**边界**（`[]` → `[]`、`[7.5]` → `[1.0]`）；**溢出现象**：`[1000, 0]` 直算抛 `OverflowError`、`[-1000, -1001]` 直算抛 `ZeroDivisionError`，稳定版两者都正常；**病态形状**（`[0, 1000]` → `[0.0, 1.0]`、`[1e6, 0]` → `[1.0, 0.0]`） | ✅ 绿（判据 2/2 · 变异 6/6） |
-| 4 | 平滑 | 未见 bigram 在留出集上让 CE 变成 `inf`；add-k（k=1）之后变**有限**，且比 `inf` 前无法比较的状态给出可比的数字（add-1 / add-0.1 各报一个） | ⬜ 待写 |
+| 4 | 平滑（闭词表 + add-k） | **两种病分开治**：未见 bigram 让 CE = `inf`（84 个位置里 26 个「缺列」、41 个「含生字」）⇒ ① 词表改**闭词表** V = 158 + `<UNK>` = **159**，评估前折叠且 `len` 不变 ② add-k 后 held **有限**，`k = 1 / 0.1 / 0.001` 各报一个，且「行和恒等式 `(c+k)/(C+k\|V\|)`」与「两路互证（差 < 1e-12）」同时成立；训练集必须**变差**（k 越小越接近 MLE） | ✅ 绿（判据 2/2 · 变异 7/7） |
 
 ## 实测数字
 
@@ -38,7 +38,14 @@
 | naive 两种死法 | `[1000, 0]` → **`OverflowError`** ｜ `[-1000, -1001]` → **`ZeroDivisionError`** | 同一台机器、两种异常，防溢出不只防大数 |
 | 稳定版极端值 | `[1000, 0]` → **`[1.0, 0.0]`** ｜ `[-1000, -1001]` → **`0.73106 / 0.26894`** | 差 1000 时小项下溢为 0.0；差 1 时精确（= `1/(1+e⁻¹)`） |
 | 病态形状 | `[0, 1000]` → **`[0.0, 1.0]`** ｜ `[1e6, 0]` → **`[1.0, 0.0]`** | 抓「减首项」「减 mean」的唯一输入（见踩坑） |
-| add-1 / add-0.1 后 CE | | 判据 4 |
+| 闭词表 V | **159**（= 158 + `<UNK>`） | 用 158 ⇒ 24 个生字位置概率 0 ⇒ held 仍 `inf` |
+| 折叠 | token **85 → 85**（不变）· 不同 token **61 → 40** · 生字 **22 种 / 出现 24 次** | `"".join` 会变 **181** 字符（位置 84→180） |
+| 位置数 | **84** | 折叠前后一致，否则 CE 分母全错 |
+| 未见对 | **67/84 = 79.8%**（未折叠口径） | 含生字 41 · 纯「缺列」26 |
+| add-k CE（train） | k=1 → **6.1048**（ppl 68.82）｜ k=0.1 → **3.8545**（14.47）｜ k=0.001 → **1.3944**（2.63） | MLE **1.2943**（2.45）⇒ 平滑必升 |
+| add-k CE（held） | k=1 → **7.0590**（ppl 133.34）｜ **k=0.1 → 6.7812（109.99）**｜ k=0.001 → **8.4070**（339.44） | MLE held = `inf`；最优在 0.1，**不是越小越好** |
+| 移走质量（k=1） | 最惨行 `'清'`（C=1）→ **159/160 = 0.99375** | = `k\|V\|/(C+k\|V\|)` |
+| 两路互证（held, k=1） | 逐位置 vs 按对加权，差 **< 1e-12** | M6 漏网后补的判据（漏网时差 **5.855**） |
 
 ## 怎么跑
 
@@ -48,6 +55,7 @@ uv sync
 uv run python bigram.py          # 关卡 1：判据 2/2 绿
 uv run python entropy.py         # 关卡 2：判据 2/2 绿
 uv run python softmax.py         # 关卡 3：判据 2/2 绿
+uv run python smooth.py          # 关卡 4：判据 2/2 绿
 uv run ruff check .
 ```
 
@@ -60,6 +68,8 @@ uv run python -c "from entropy import judge_train_order as f; print(f())"
 uv run python -c "from entropy import judge_holdout as f; print(f())"
 uv run python -c "from softmax import judge_shift_invariance as f; print(f())"
 uv run python -c "from softmax import judge_overflow as f; print(f())"
+uv run python -c "from smooth import judge_smoothing_math as f; print(f())"
+uv run python -c "from smooth import judge_comparable_numbers as f; print(f())"
 ```
 
 ## 文档依据（2026-11-16 / 11-17 查证）
@@ -76,6 +86,10 @@ uv run python -c "from softmax import judge_overflow as f; print(f())"
 | `github.com/scipy/scipy` → `scipy/special/_logsumexp.py` | `scipy.special.softmax` 源码：`x_max = max(x)` → `exp(x - x_max)` → 除以和；`logsumexp` 用 `log1p(s) + a_max` 把 max 加回 ⇒ 官方库同样是「先减 max」 |
 | 本机实测（Python 3.14.8） | `exp(710)` 抛 `OverflowError`、`exp(-746)` 返回 `0.0`（不抛）、`0.0/0.0` 抛 `ZeroDivisionError` |
 
+| SLP3 Ch.3 *N-gram Language Models* | add-k 公式 `(c+k)/(C+k\|V\|)`；k=1 即 add-1；add-1 对 n-gram **过度平滑**（⚠️ 该 PDF 抓取后是二进制流、正文未解码，公式经下面两条来源交叉确认，页码待本地核对） |
+| mbrenndoerfer.com《Language AI Handbook》§9.4（2025-03-22） | 分母加 `k\|V\|` 的唯一目的是 Σ=1；移走质量随 \|V\| 增大 / 随 C 减小；k 典型 **0.001–0.5**、用 dev 的 ppl 调；add-k 是「relatively poor performer」，更强的是 Kneser-Ney |
+| 深度学习课程笔记（NLP w/ Probabilistic Models W3） | 闭词表三步：建 V → 语料里不在 V 的替换成 `<UNK>` → 当普通词计数；**「Perplexity — only compare LMs with the same V」**；「use `<UNK>` sparingly」 |
+
 ⚠️ 版本陷阱：`math` 文档站当前展示的是 **3.15.2**，本机跑 **3.14.8** —— 3.15 新增的
 `math.fmax` / `math.fmin` / `math.signbit` / `math.isnormal` **用不了**，别照抄。
 
@@ -88,10 +102,14 @@ uv run python -c "from softmax import judge_overflow as f; print(f())"
 | **跳过未见位置后分母没跟着变** | `skip_unseen=True` 时跳了位置却仍除以 `len(eval_text)` ⇒ 留出集 CE 从 **1.6935** 掉到 **0.3427**（「比训练集还好」）→ 判据「必须升高」红 |
 | **把未见字删掉再收相邻对** | 删字会造出原文里不存在的对（`a b c d e` 删 `c` ⇒ 凭空出现 `(b,d)`）。真实语料里恰好没撞上 ⇒ **变异一度是绿的**；改用设计好的小语料 `tiny_train="adbc"` / `eval="axd"`（正确答 `nan`，删字法答 `0.0`）才抓得住 |
 | **`if pairs == 0:` 判空列表** | `[] == 0` 是 **`False`**，守卫形同虚设 ⇒ 空串/单字走到 `0.0 / 0` → `ZeroDivisionError`。要写 `if not pairs:` |
-| **`math.log2` 误写成 `math.log`** | 单位从 bit 变 nat，所有 CE 一起除以 **2.303** ⇒ 严格序仍成立（1.29→0.56）、留出集「升高」也仍成立，**只有两路互证能抓**（0.8972 vs 1.2943） |
+| **`math.log2` 误写成 `math.log`** | 单位从 bit 变 nat，所有 CE 一起**乘 ln2（÷1.4427）** ⇒ 严格序仍成立（1.29→0.90）、留出集「升高」也仍成立，**只有两路互证能抓**（0.8972 vs 1.2943）。⚠️ 2026-11-19 更正：原文写「÷2.303、1.29→0.56」是错的（2.303 是 log10 的系数）；0.8972 那个数本来是对的 |
 | **守卫拿原文判「见过」** | `char not in train` 现在等价于 `char not in probs`；一旦关卡 4 加平滑/`<UNK>`，模型知道训练集没有的字，用原文判会提前 `return inf`，把平滑白做 |
 | **`itertools.pairwise` 忘了 `list()`** | 返回迭代器，`len()` 抛 `TypeError`，遍历第二次是空的（一次性） |
 | **保序判据写成 `all(a < b for a, b in [zip(x, x[1:])])`（多套一层方括号）= 假绿** | `for a, b in diff` 只从「只含 1 个元素的列表」里取到那个 zip，于是 `a` / `b` 变成**两个元组**，比较的是**元组字典序**：非单调的 `[0.1, 0.5, 0.4]` 也返回 `True`。正确写法是链式比较 `probs[0] < probs[1] < probs[2]` |
 | **变异 M2（减 mean）/ M3（减首项）一开始漏网** | 原有极端输入 `[1000, 0]` 的首项**恰好是 max**、`mean` 位移只到 500（`exp(500)≈1.4e217` 仍在安全区）⇒ 两条变异全绿。补 `[0, 1000]`（首项是最小值）与 `[1e6, 0]`（差值 1e6 ⇒ mean 位移仍剩 5e5）才红。**判据强度看输入形状，不看断言条数** |
 | **`zip` 静默截断（ruff B905）** | `zip([1,2,3], [4,5])` → 2 对，**不报错**；长度不等会被洗成「绿」。`strict=True`（3.10+）才抛 `ValueError`；`pyproject.toml` 开了 `B`，漏写 `strict=` 直接 lint 红 |
 | **`abs(实测 − 期望)` 里把期望也算成 bool** | 写成 `judge1 = abs(...) < 1e-15` 就会丢掉实测值，README 的数字再也拿不回来 —— 断言用 bool，**打印要留原值** |
+| **`<UNK>` 是 5 个字符的 1 个 token** | 用 `"".join(tokens)` 折叠 ⇒ 85 个 token 变 **181** 个字符，位置数 84→180、CE 全错**且不报错**。折叠必须返回 **token 列表**，用 `itertools.pairwise(列表)` 收相邻对 |
+| **平滑只用了训练集那 158 个字的词表** | 24 个位置的 next 不在候选集里 ⇒ 概率仍是 0 ⇒ held CE 还是 `inf` —— 现象是「平滑写了，inf 还在」。词表要 `158 + <UNK> = 159`，判据钉 `len(vocab) == len(set(train)) + 1` |
+| **「跳过位置但分母不变」注进去后判据全绿（M6 漏网）** | 当时的 8 条判据一条都抓不到：它只让 held 悄悄变低（**1.2038 vs 真值 7.0590**）。补「两路互证」（逐位置 vs 按对加权，差 < 1e-12）才红（差 **5.855**）⇒ 判据分两班岗：概率表归一 / 平均口径 |
+| **手算期望值照「想当然」写** | `build_counts("adbc")` 的相邻对是 `(a,d)(d,b)(b,c)` ⇒ `P(d\|a)=0.4`、`P(b\|a)=0.2`、`P(*\|c)=0.25`（c 才没当过上下文）。写成 `P(b\|a)=0.4` 的断言当场红 |
