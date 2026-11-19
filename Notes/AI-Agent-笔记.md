@@ -650,6 +650,82 @@ V 在这条线上有三种口径，混用就是静默错：
 
 ---
 
+## 9. GPU 环境与轮子匹配：cp314 / cu128 / sm_120（2026-11-19 · L2 关卡 0）
+
+> 一句话：GPU 版 torch 是**按「平台 + Python 版本 + CUDA 版本」预编译好的二进制**。
+> 装错不会「慢一点」，而是第一次 GPU 运算就报
+> `no kernel image is available for execution on the device` —— **看着像代码错，其实是轮子错**。
+> 生活模型：买轮胎。轮毂尺寸（Python ABI）、螺栓孔距（CUDA 版本）、车架型号（算力 sm_XX）三者都得对上，
+> 差一个不是「开得慢」，是根本装不上。
+
+### 9.1 一个轮子文件名的三段话
+
+```
+torch-2.11.0+cu128-cp314-cp314-win_amd64.whl
+      └─版本──┘└CUDA┘└Python ABI┘       └平台┘
+```
+
+| 标签 | 本机要的值 | 不对会怎样 |
+|---|---|---|
+| 平台 | `win_amd64` | 装不上（直接报错） |
+| Python ABI | **`cp314`**（Python 3.14.8） | 找不到可用轮子（解析阶段就失败） |
+| CUDA 渠道 | **`cu128`** | 装得上但**跑不了**：`no kernel image is available` |
+
+### 9.2 本机的三个硬约束（叠起来才是「torch ≥ 2.9」）
+
+| 约束 | 来自 | 结论 |
+|---|---|---|
+| Blackwell **sm_120** | RTX 5060 Laptop（capability (12,0)） | 轮子里必须有 sm_120 内核 ⇒ **cu128 及以后**、torch **≥ 2.7** |
+| **cp314** | 系统 Python 3.14.8 | cu128 索引里 cp314 **从 2.9.0 起**才有（2.7.x / 2.8.0 没有） |
+| 渠道最新 | `download.pytorch.org/whl/cu128/torch/` | 最高 **2.11.0** ⇒ 实际装 `2.11.0+cu128` |
+
+⇒ 「torch ≥ 2.7」是**架构侧**的门槛，「torch ≥ 2.9」是**Python 版本侧**的门槛，**两者取严**。
+
+### 9.3 用 uv 钉住渠道（不钉就会拿到默认渠道的轮子）
+
+```toml
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+```
+
+- `explicit = true` = 这个索引**只服务于**下面显式点名的包，不会污染其它依赖的解析；
+- 不写 `[tool.uv.sources]` ⇒ torch 仍从默认索引拿（不是 cu128 那份）；
+- 装完必须打印 `torch.__version__` 与 `torch.version.cuda` 自证：实测 `2.11.0+cu128` / `12.8`。
+
+### 9.4 首次 ≠ 稳态：探针不预热就会误判显卡
+
+| 项目 | 首次 | 稳态（预热 3 次、测 10 次均值） | 倍数 |
+|---|---|---|---|
+| matmul 1024³ | **388.8 ms** | **0.65 ms**（3.29 TFLOPS） | **≈600×** |
+| attention(B=8,T=1024,d=64) 前向 | 148.7 ms（首轮曾 **5443.7 ms**） | **1.50 ms** | ≈100× |
+
+首轮要付 **CUDA context 初始化 + cuBLAS/cuDNN 惰性加载**的账；把首次当性能，会把一块 8 GiB 的 5060 说成玩具。
+⇒ **报耗时必须写清「首次 / 稳态」，并说明预热次数与重复次数。**
+
+### 9.5 判据（可复测 · 汇总）
+
+| 判据 | 期望 | 实测 |
+|---|---|---|
+| CUDA 可用 | `torch.cuda.is_available()` | `True` |
+| 算力匹配 | `get_device_capability() == (12, 0)` | `(12, 0)` |
+| 版本自证 | 报 `torch.__version__` / `torch.version.cuda` | `2.11.0+cu128` / `12.8` |
+| 冒烟 | 1024³ matmul + attention 前向跑通，报耗时/显存 | 稳态 0.65 ms / 1.50 ms · 峰值 **126 MiB** |
+| 数值正确 | softmax 行和 = 1 | 偏差 **2.38e-07** |
+
+### 9.6 官方依据（2026-11-19 查证）
+
+- `download.pytorch.org/whl/cu128/torch/` — 索引里 cu128 覆盖 2.7.0–2.11.0；**cp314 Windows 轮子从 2.9.0 起**（2.7.x / 2.8.0 无）。
+- PyTorch 2.7 发布说明 — 2.7 起支持 **Blackwell**，并提供 **CUDA 12.8** 预编译轮子（Linux x86/arm64；Windows 同样有 cu128 轮子）。
+- Clore.ai 兼容表 + 社区复现 gist — Blackwell / sm_120 需要 **CUDA 12.8+ 与 torch ≥ 2.7**；不匹配的症状就是 `no kernel image is available`。
+- 本机实测（Python 3.14.8 / uv 0.12.23 / 驱动 621.14）— `torch 2.11.0+cu128`、`capability (12, 0)`、首次 vs 稳态差 ≈600×；`torch` 不自动带 `numpy`（导入告警 `Failed to initialize NumPy`）。
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
