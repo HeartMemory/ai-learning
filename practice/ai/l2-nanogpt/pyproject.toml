@@ -1,0 +1,34 @@
+[project]
+name = "l2-nanogpt"
+version = "0.1.0"
+description = "L2 注意力：单头 attention → 最小 Transformer block（关卡型目录）"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.5.5",
+    "torch>=2.9",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
+
+# torch 只从 cu128 渠道取：本机 5060 = Blackwell sm_120，cu126 及更早的轮子不含 sm_120 内核
+# （症状是第一次 matmul 报 `no kernel image is available for execution on the device`，不是代码错）。
+# 系统 Python 3.14 ⇒ 需要 cp314 轮子，cu128 渠道里从 torch 2.9.0 起才有。
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文注释 / docstring 里的全角标点是刻意的，不算易混淆字符
+ignore = ["RUF001", "RUF002", "RUF003"]
