@@ -45,13 +45,13 @@ def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
         messages=[{"role": "user", "content": prompt}],
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
+    if not response.choices:
+        raise RuntimeError("供应商返回了空 choices")
     message = response.choices[0].message
     usage = response.usage
     if usage is None:
         raise RuntimeError("供应商没返回 usage，无法记账（判据 ① 要平台数字）")
     text = message.content or ""
-    if not response.choices:
-        raise RuntimeError("供应商返回了空 choices")
 
     return Answer(
         text=text,
