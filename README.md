@@ -92,6 +92,8 @@ ai-learning/
 
 | 11-19 周四（加练） | **L2 关卡 0：环境（cu128）**（新建 `practice/ai/l2-nanogpt/`，本仓库第一个 GPU 依赖练习）：先查证三条来源（cu128 索引 / PyTorch 2.7 发布说明 / 社区复现），确认本机三条硬约束叠加后是 **torch ≥ 2.9**（sm_120 要 cu128 及以后；Python 3.14.8 要 cp314；cu128 索引里 cp314 从 2.9.0 起）⇒ `pyproject.toml` 用 `[[tool.uv.index]] explicit = true` + `[tool.uv.sources]` 把 torch 钉在 cu128 渠道；探针 `env_probe.py` 分「首次 / 稳态」两报（首轮曾测到 **5443.7 ms**，稳态 1.50 ms —— 冷启动开销不能当显卡性能）；顺手修两个环境坑（`1024³` 在 GBK 控制台崩、torch 不自带 numpy） | 判据 **2/2 绿** ｜ `torch 2.11.0+cu128`（编译期 CUDA **12.8**）· **capability (12, 0)** · 显存 7.93 GiB · 驱动 621.14 ｜ matmul(1024³) 首次 **388.8 ms** → 稳态 **0.65 ms**（**3.29 TFLOPS**）｜ attention(B8/T1024/d64) 首次 148.7 ms → 稳态 **1.50 ms** ｜ 峰值显存 **126 MiB** ｜ softmax 行和偏差 **2.38e-07** ｜ 安装 **11 包 1m00s** + numpy 5.15s ｜ 官方查证 **3 条来源** ｜ AI 册 **8 → 9 章** ｜ 回访 **52 条不变**（今天已用满 3 条上限）｜ 索引对账 **练习 14 == 14 · 交付物 0 == 0** ｜ **0 次模型调用（0 token）** | ✅ |
 
+| 11-19 周四（夜间） | **L4 关卡 0：打通与记账**（新建交付物 `projects/llm-cli/`，包结构 `python -m llm_cli`）：`argparse` 两层入口（`prompt` 位置参数 + `--model` 临时覆盖 `.env`）、`config.py` 按**绝对路径**读 `.env` 且 `Settings.api_key` 用 `field(repr=False)` 防日志泄漏、`ask()` = 计时 → 调用 → 从 `usage` 记账 → 收窄成 `Answer`、`main()` **先打账单再判成败**（退出码 0/1/2/3）。查证两条：`max_tokens` 已标 deprecated ⇒ 用 `max_completion_tokens`；**模型切换的市面惯例 = 配置定默认 + 参数临时覆盖**（Claude Code / aichat / Aider / `llm` 同构，Ollama 例外 —— 模型名当位置参数） | 判据 **2/2 绿** ｜ 真实调用（本人跑）：**输入 31 · 输出 295 token · 2873.43 ms · `finish_reason=stop`**，输出/输入 **9.5×** ｜ 判据 ② 三处：`check-ignore` 命中 `.gitignore:12` · `git grep sk-` 无输出 · `cli.py`/`llm.py` 无 `os.environ` 与字面量 key ｜ 官方查证 **2 处**（openai-python 的 `completion_create_params` 与 `usage`/`finish_reason` 类型声明）｜ 静态：`ruff check` 全绿 · Pylance **0 诊断** ｜ 索引对账 **交付物 1 == 1** | ✅ |
+
 （每天收工后更新）
 
 ## 沉淀笔记
