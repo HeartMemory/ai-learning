@@ -32,11 +32,12 @@ ai-learning/
 
 > 关卡是**唯一进度单位**。过关 = 判据全绿；允许插队与降级通过，但要在 `HANDOVER.md` 记一行「跳过了什么」。
 > **应用段暂不规划**，等具体内容（老师给的 / 游戏那边真需要做的）再单独排。
+> **每关收口附变异种子**（改判据必红，≥4 个/关；判据里只放数字与边界，不放阈值魔法数）。
 
 | 关 | 内容 | 判据（过关 = 全绿） | 交付物 | 状态 |
 |---|---|---|---|---|
 | **L1** | 词与概率：char-level bigram、交叉熵、softmax | ① **计数守恒**（总对数 = `len-1`，且每个 context 行和 = 该字出现次数）② **交叉熵严格序** `log2(V) > CE_unigram > CE_bigram`（bits/char，三个数都报），留出集上 bigram CE 必须升高 ③ **softmax 平移不变**（差 < 1e-12）+ 溢出对照（`[1000, 0]` 直算抛 `OverflowError`，减 max 后正常）④ **平滑必需**：未见 bigram 使 CE → `inf`，add-k 后变有限可比（闭词表 V=159 + `<UNK>`；k=1/0.1/0.001 各报一个，训练集必升） | `practice/ai/l1-bigram` | ✅（四关 2/2 ×4 · 变异 5/5 + 6/6 + 6/6 + 7/7 · 2026-11-19 收口） |
-| **L2** | 注意力：单头 attention → 最小 Transformer block | 待拆 | `practice/python/nanogpt/`（长期） | ⬜ |
+| **L2** | 注意力：单头 attention → 最小 Transformer block（**五关，0–4 全绿**） | **0 环境**：① `cuda.is_available()` 且 `get_device_capability() == (12, 0)`（本机 5060 = Blackwell sm_120，**必须 torch ≥ 2.7 的 cu128 轮子**，旧轮子报 `no kernel image is available`）② 1024³ matmul + 一次 attention 前向在 GPU 上跑通，报耗时与显存 ｜ **1 单头算术**：① 4 token × d=2 的 Q/K/V 写死，手算权重矩阵与输出对 torch 逐元素差 < 1e-12、每行和 = 1（±1e-12）② **缩放要有数字**：d ∈ {2, 8, 64, 512} 的 score 标准差比 ≈ √(d₂/d₁)；不除 √d 时 d=512 的 softmax 最大权重 → 1、熵坍缩，除完熵回升（两个数都报）｜ **2 掩码与位置**：① 改未来不影响过去：改第 5、6 个 token → 前 4 个位置 Δ **严格 0**；只改第 6 个 → 第 5 个 Δ > 0；mask 后第 i 行非零个数 = i+1、行和 = 1 ② 无位置编码 ⇒ 置换等变（重排后输出同步重排，差 < 1e-12）；加正弦／RoPE 后同一置换差 > 1e-3（报值）｜ **3 最小 block**：① 形状 (B,T,C) 不变；`sum(p.numel())` 与手算公式一致（报数字）；输入整体 ×1000 后 LayerNorm 输出有界 ② `torch.autograd.gradcheck`（float64）通过，且 CE 对 logits 的梯度 = (softmax − onehot)/N，与手算差 < 1e-12 ｜ **4 真训练**：① char-level tinyshakespeare（65 词表）固定 2000 步，`max_memory_allocated` 峰值 **< 6 GiB**（8151 MiB 笔记本卡，留桌面余量）、不 OOM ② **val CE 严格低于同语料 bigram 基线**（两个数都报），生成 200 字内最长重复片段 ≤ 20 字符 | `practice/ai/l2-nanogpt/` | ⬜ |
 | **L3** | 训练工程：五种失败症状对照（lr / warmup / 过拟合 / batch） | 待拆 | L2 的对照记录 | ⬜ |
 | **L4** | 调用与可控：流式 / 结构化输出 / token 成本 / prompt | 待拆 | `projects/llm-cli/` | ⬜ |
 | **L5** | **工具与循环：手写 Agent（禁用框架）** | 待拆 | `projects/mini-agent/` | ⬜ |
