@@ -29,6 +29,26 @@ class Answer:
     finish_reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class StreamAnswer:
+    """流式一次调用的产出：拼接正文 + 两个时间 + 账单 + 有没有真的走完。
+
+    ⭐ 与 `Answer` 的两处差别（都是踩出来的，不是设计洁癖）：
+      · token 三数是 `int | None` —— 流被打断时**官方不给 usage 汇总帧**，那时没有账单可记
+      · 多个 `completed` —— 「循环自然结束」不等于「成功」，只有收到 `finish_reason` 才算走完
+    """
+
+    text: str
+    chunks: int
+    first_token_ms: float | None
+    elapsed_ms: float
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    finish_reason: str | None
+    completed: bool
+
+
 def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
     """发一次请求，返回 `Answer`。
 
@@ -60,4 +80,79 @@ def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
         total_tokens=usage.total_tokens,
         elapsed_ms=elapsed_ms,
         finish_reason=response.choices[0].finish_reason,
+    )
+
+
+def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
+    """流式发一次请求：边到边收增量，同时记「首 token 何时到」与「总共多久」。
+
+    判据（L4 关卡 1 ①，两个数都要报，且首 token 明显早于总时长）：
+      · `first_token_ms` = 第一个**非空正文增量**到达的时刻 − 计时起点
+      · `elapsed_ms`     = 整个循环结束 − 计时起点
+
+    实现要点（按踩坑顺序排，**不是**方法体）：
+      1. `create(..., stream=True, stream_options={"include_usage": True})` —— 不传
+         `stream_options` 就没有 usage 汇总帧，流式调用将**完全无法记账**
+      2. `chunk.choices` 可能为空列表（就是那条只带 usage 的汇总帧）⇒ 取 `choices[0]` 前
+         必须先判空，否则 `IndexError`（与关卡 0「空 choices 守卫前移」同源）
+      3. `delta.content` 可能为 `None`：role 帧、纯 reasoning 帧、终止帧都有 content=None
+         ⇒ `None` **不算首 token**，也不拼接（拼进去会让判据 ② 逐字符相等永远差几个字符）
+      4. `finish_reason` 只在最后一条**有 choices** 的帧上非 None ⇒ 拿它当「走完了」的唯一判据；
+         **循环自然结束 ≠ 成功**（官方原话：不要假设流走完就是成功）
+      5. usage 只在汇总帧上，且**流被打断时拿不到** ⇒ 本函数拿不到就把三个 token 数填
+         `None`、`completed=False`，**不抛错** —— 与关卡 0「拿不到 usage 就 raise」相反：
+         那边是「跑完了没账单」，这边是「本来就没跑完，半截账单不存在」
+
+    官方出处（2026-11-20 查证 · 两条来源）：
+      · ① SDK 源码 `types/chat/chat_completion_stream_options_param.py`：`include_usage` 会在
+        `data: [DONE]` 前多推一条 `choices` 为空、只带 `usage` 的帧；原文
+        "If the stream is interrupted, you may not receive the final usage chunk"
+      · ① SDK 源码 `_streaming.py`：`__stream__` 的 `finally` 里调 `response.close()`
+        ⇒ 循环里 `break` 会自动关连接，不需要自己 try/finally
+      · ② 官方 README：流消费**不会自动重试**（重放会重复输出）；读超时抛
+        `APITimeoutError`，其它连接失败抛 `APIConnectionError`，原始异常在 `__cause__`
+    """
+    started = time.perf_counter()
+    text = ""
+    first_token_ms: float | None = None
+    chunks = 0
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    for chunk in stream:
+        chunks += 1
+        if not chunk.choices:
+            usage = chunk.usage
+            if usage is not None:
+                prompt_tokens = usage.prompt_tokens
+                completion_tokens = usage.completion_tokens
+                total_tokens = usage.total_tokens
+            continue
+        delta = chunk.choices[0].delta
+        if delta.content is not None:
+            if first_token_ms is None:
+                first_token_ms = (time.perf_counter() - started) * 1000
+            text += delta.content
+            print(delta.content or '', end="", flush=True)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason = chunk.choices[0].finish_reason
+
+    return StreamAnswer(
+        text=text,
+        chunks=chunks,
+        first_token_ms=first_token_ms,
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        finish_reason=finish_reason,
+        completed=finish_reason is not None,
     )
