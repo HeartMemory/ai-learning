@@ -726,6 +726,107 @@ torch = { index = "pytorch-cu128" }
 
 ---
 
+## 10. 流式：把「等生成完」换成「边生成边交」（2026-11-20 · L4 关卡 1）
+
+### 10.1 流式改的是「交付方式」，不是「生成速度」
+
+模型是**一个 token 一个 token 接龙**的。非流式 = 服务端接完整段再打包发回；流式 = 每接出几个 token 就往前推一小包。
+
+| 项 | 流式影响 | 原因 |
+|---|---|---|
+| **首字延迟（TTFT）** | 大幅下降 ← **唯一的核心收益** | 收到第一包就能开始显示 |
+| 总时长 | **基本不变**（实测差 3%） | 生成工作量没变，逐帧解析还多一点开销 |
+| token / 费用 | **完全不变** | 计费看 token 数，不看分几包发 |
+| 可中断性 | 从「不能」变成「能」 | 看到跑偏可以立刻停，省掉后续输出 token |
+
+⚠️ 反直觉：中断**省不多**。prompt 的钱在请求那一刻就花了，中断只能砍掉「还没生成的输出」。
+
+### 10.2 传输层：SSE，一条长连接 + 一行行 `data:`
+
+```
+data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}      ← 开场帧：只有角色，没正文
+data: {"choices":[{"index":0,"delta":{"content":"二"}}]}          ← 正文增量
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]} ← 终止帧：只有原因，没正文
+data: {"choices":[],"usage":{"prompt_tokens":31,...}}             ← 账单帧：choices 是空列表！
+data: [DONE]
+```
+
+SDK 把这些吞成 `Stream[ChatCompletionChunk]`（可迭代对象），`create(stream=True)` 就拿到它。
+
+### 10.3 `delta` 是增量，`usage` 是总计 —— 两种东西在同一个流里
+
+| | 正文 | 账单 |
+|---|---|---|
+| 字段 | `choices[0].delta.content` | 顶层 `chunk.usage` |
+| 语义 | **增量**（这一口新增） | **总计**（整次请求） |
+| 频率 | 几乎每帧 | 只有最后一帧，其它帧是 `null` |
+| 谁负责拼 | **客户端**（`"".join(parts)`） | 不用拼 |
+
+为什么不每帧发全量：输出 300 字切 100 帧，全量方案要传 ≈15000 字，增量方案 ≈300 字 —— 多出来的全是重复。工具调用参数（`delta.tool_calls[i].function.arguments`）同样是碎片，**必须拼完再 `json.loads`**。
+
+`None` 的语义是「这一帧没说这个字段」，不是「内容为空」：开场帧只有 `role`，终止帧只有 `finish_reason`，思考帧只有 `reasoning_content`。
+
+### 10.4 循环为什么「不会提前结束」：阻塞藏在 `__next__` 里
+
+```python
+for chunk in stream:   # = while True: chunk = next(stream)
+```
+
+`for` 每转一圈都要问迭代器要东西；`Stream.__next__` → `_iter_events()` → `self.response.iter_bytes()` —— **真正阻塞在 socket 读**，没数据就挂起线程（GIL 释放，CPU 占用 0）。
+
+⇒ 消费端代码看不出快慢差别：`iter([1,2,3])` 的 `__next__` 微秒返回，`iter(stream)` 的 `__next__` 可能挂几秒。**判别标准不是「容器 vs 生成器」，而是「`__next__` 里有没有等外部世界」**（`for line in open(...)` 早就在等了，只是磁盘太快没感觉）。
+
+### 10.5 三种「循环结束」，只有一种算成功
+
+| # | 触发 | 表现 | 算成功吗 |
+|---|---|---|---|
+| A | 收到 `data: [DONE]` | SDK 主动 `break` → `StopIteration` | ✅ |
+| B | 对端**关连接但不发 `[DONE]`** | 迭代器自然耗尽 → **平静退出、无异常** | ❌ 半截，但长得跟成功一样 |
+| C | 读超时 / 连接错误 | `APITimeoutError` / `APIConnectionError`（原异常在 `__cause__`） | ❌ |
+| D | 自己 `break` | 正常退出（SDK 的 `finally` 会 `response.close()`） | ❌ 半截 |
+
+⇒ **「循环自然结束 ≠ 成功」**。唯一判据 = 收到过非 `None` 的 `finish_reason`。另：**流消费不自动重试**（普通请求默认重试 2 次），因为重放会把已交付的输出再吐一遍。
+
+### 10.6 `print` 的三层缓冲（「明明在流式，屏幕却不刷新」的元凶）
+
+| 层 | 会不会加换行 |
+|---|---|
+| 字符串变量 | 不会（正文里的 `\n` 属于内容） |
+| `print()` | 会，默认 `end="\n"` |
+| stdout 缓冲 | 终端 = **行缓冲**（遇 `\n` 吐）；管道 / 文件 = **块缓冲**（本机 **128 KiB**） |
+
+关键：`end=""` 去掉了 `\n`，**行缓冲就失去触发器** ⇒ 边打边输必须 `flush=True`。另：Windows 把 `\n` 写成 `\r\n` 只发生在落盘 / 重定向，内存字符串不受影响 ⇒ **比对要在内存里做，别看屏幕、别复制终端**。
+
+### 10.7 思考模式：采样参数失效与 `reasoning_content`
+
+| 事实 | 影响 |
+|---|---|
+| 思考模式**默认开启**（effort 默认 `high`） | 不写参数就是思考模式 |
+| 思考模式**不支持** `temperature` / `presence_penalty` / `frequency_penalty` | **收下不报错、也不生效** ⇒ 「我设了 temp=0」不等于「输出确定」 |
+| `top_p` 因模型而异 | 该模型思考模式 0.95–1.0（低于 0.95 按 0.95），**非思考模式恒 1.0** |
+| `thinking` 非 SDK 原生字段 | 走 `extra_body={"thinking": {"type": "disabled"}}`；`reasoning_effort` 走普通参数 |
+| 思考内容在 `delta.reasoning_content` | 与 `content` **同级**、**不同时非空**；非流式在 `message.reasoning_content` |
+| 带 `tools` 的会话 | **必须回传**历史 `reasoning_content`，漏了直接 **400** |
+| 隐藏成本 | 同一 prompt：思考模式输入 **45** token → 关思考 **19** token ⇒ **≈26 个看不见的输入 token** |
+
+⇒ 首 token 的口径必须写死：**正文**首个非空 `delta.content` 的到达时刻（不含 role / 终止 / 账单 / 纯思考帧），否则跨模型不可比。
+
+### 10.8 判据：两个数怎么取，以及「不可判定」怎么写
+
+- **首 token / 总时长取中位数**：5 次实测中位 **567.15 / 2219.08 ms**，而平均值 **648.54 / 2236.72 ms** —— 第 3 次 1059 ms 的异常值把平均值抬了 **14.3%**。中位数抗极端值，这就是判据写「中位数」的理由。
+- **「流式文本 == 非流式文本」同时测了两件事**：拼接无损 + 两次生成相同。后者在思考模型下不可控（温度不生效）⇒ 判据变成**不可判定**，不许改判据凑绿。
+- 分开两件事的办法：**低熵任务**（「从 1 数到 30，每行一个数字」）—— 两次生成几乎必然一致，此时 `差 = 0` 才真正证明拼接无损（实测 `True ｜ -1 ｜ 0`，token 22/60 两边一致）。
+- 判「不是拼接 bug」的三条证据：分歧形态（措辞不同 vs 丢字/重复）、长度差、两边 token 数。拼接只能造出丢字 / 重复 / 乱序，**造不出整段改写**。
+
+### 10.9 官方依据（2026-11-20 查证 · 四条来源）
+
+- SDK 源码 `types/chat/chat_completion_stream_options_param.py` — `include_usage` 在 `data: [DONE]` 前多推一条 `choices` 为空的帧；原文 *"If the stream is interrupted, you may not receive the final usage chunk"*。
+- SDK 源码 `_streaming.py` — `__stream__` 里 `if sse.data.startswith("[DONE]"): break`；`finally: response.close()`；超时映射 `APITimeoutError` / `APIConnectionError`。
+- SDK README — 流消费**不会自动重试**（重放会重复输出）；「不要假设循环走完就是成功」。
+- 供应商「思考模式」官方文档 — `thinking.type` 走 `extra_body`、默认 enabled（effort `high`）、思考模式不支持 `temperature` / 两个 penalty、`top_p` 分模型、`reasoning_content` 位置、带 `tools` 必须回传（否则 400）。
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
@@ -734,8 +835,8 @@ torch = { index = "pytorch-cu128" }
 |---|---|---|
 | S0 | 1-9 | **Python 语言层整体迁出** → 见 `Python-基础笔记.md`（语法总览 / list / 可变性陷阱 / dict·set / 装饰器 / 模块 / async / httpx / pydantic）—— 本册不再记 Python 语言本身 |
 | S1 | 5 | messages 结构 / role / system vs user（**基础已在第 2.3 节**；剩 `system` 与 `user` 的取舍、多轮对话与上下文拼接） |
-| S1 | 6 | 流式（SSE）与首 token 延迟 |
-| S1 | 7 | 采样参数：temperature / top_p / max_tokens |
+| S1 | 6 | 流式（SSE）与首 token 延迟 → **已在第 10 章**（2026-11-20 落章） |
+| S1 | 7 | 采样参数：temperature / top_p / max_tokens → **失效条件**见第 10.7 节（思考模式下温度不生效）；其余待学 |
 | S1 | 8 | token 计量与成本估算 |
 | S1 | 9 | 结构化输出：JSON Schema + 校验 + 重试 |
 | S1 | 10 | Context Engineering：上下文怎么组织 |
