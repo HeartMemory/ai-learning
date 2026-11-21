@@ -827,6 +827,91 @@ for chunk in stream:   # = while True: chunk = next(stream)
 
 ---
 
+## 11. 结构化输出：把「请输出 JSON」换成可校验的契约（2026-11-21 · L4 关卡 2）
+
+### 11.1 两种 JSON 模式不是一回事
+
+| | `json_object` | `json_schema` + `strict` |
+|---|---|---|
+| 保证 | **能 parse** | **严格遵循 schema** |
+| 不保证 | 键名、字段类型、字段数量（供应商原话：「不同提示词或不同次调用的返回结果可能存在差异」） | 业务口径（空字符串照样合法） |
+| 提示词要求 | `messages` 里**必须**出现 "json" 字样，否则 **400** | 建议说明，无硬性关键词 |
+| 实现层 | 只约束「输出是 JSON」 | 约束交给**解码器**：不合法的 token 在生成时概率为 0 |
+
+### 11.2 strict 的两条硬条件（都能用代码判定）
+
+1. **`required` 必须覆盖全部 `properties`**。想表达「可缺」不能用「不写进 required」，而要用**可空联合类型** `["string","null"]`（并仍留在 `required` 里）。
+2. **每个 object 节点都要 `additionalProperties: false`** —— 包括 `$defs` 里的嵌套模型定义。
+
+两家的口径**不一样**，写 schema 要按交集：
+
+| 项 | OpenAI / Azure | 阿里云百炼 |
+|---|---|---|
+| 可选字段 | **必须**进 `required`（可空表达） | 可以**不进** `required`（不进 = 真可选） |
+| 关键字子集 | 窄：不收 `minLength` / `pattern` / `format` / `minimum` / `minItems` / `maxItems` | 宽：上述都收；但 `multipleOf` / `uniqueItems` / `patternProperties` / `propertyNames` 不收，**直接 400** |
+| `$ref` | `$defs` 本地引用可用 | 同；**外部 URL 的 `$ref` 不生效且不报错** |
+| 多模态输入 | — | 带图/视频/音频时 `json_schema` **静默降级**成 `json_object`，约束失效且**不报错** |
+
+⇒ 结论：schema 里只用**交集关键字**（`type` / `enum` / `items` / `anyOf` / `required` / `additionalProperties`），业务口径（姓名非空、列表至少一项）放到**校验层**。
+
+### 11.3 pydantic → schema：三个会静默犯的错
+
+| 现象 | 真因 | 后果 |
+|---|---|---|
+| schema 里没有 `additionalProperties` | pydantic 2.14 的 `model_json_schema()` 只给 `type: "object"` | strict 要求每个 object 都有 ⇒ 自己递归补；漏了就是"看起来合规" |
+| 字段突然不在 `required` 里 | 写了 `= None`：pydantic 把「有默认值」当「非必填」 | ① OpenAI strict **400** ② 本地校验放水（缺字段用默认值补，照样"通过"）⇒ **20 次通过率虚高** |
+| `dict[str, str]` 字段报错 / 需要改写 | 它的 `additionalProperties` 是**一个 schema**（`{"type":"string"}`）而不是布尔 `false` | 覆盖成 `False` = 「只接受空对象」，语义反转且不报错；strict 下只能改写成 `list[KV]` 小模型 |
+
+判据写法：**用「有没有 `properties`」判断 object 节点**，不要用「`type == "object"`」（后者在 `dict[str, X]` 上也成立，还会漏 `type` 为列表的联合类型）。
+
+### 11.4 「解码器在挡」和「校验层在挡」是两件事（本关最大教训）
+
+- **约束解码**：服务端把 schema 编译成语法约束，生成时把不合法 token 的概率压成 0。所以「坏输出」根本没被生成，而不是生成后被拦。
+- 观测证据（**推断，不是实证**）：20 次全合规；输出里保留了 `\n  ,` 这种冗余空白（后处理会规整掉，逐 token 生成才会留）⇒ 与约束解码一致。**服务端具体实现未公开**，不能断定是 logit mask 还是"后校验 + 重跑"。
+- 于是判据 ② 的正确取证方式是**两路**：
+  - 真实破坏性输入（引号 / 换行 / 注入句各 1 次）⇒ 证明**上游**在挡；
+  - 负例注入（把坏 JSON 直接喂校验层，**0 次调用**）⇒ 证明**校验层会红**。
+  - 「三次都通过」单独看什么都没证明 —— **门没被撞过，证明不了门结实**。
+- 校验层仍然必须存在，因为 strict 有**三处静默失效**：多模态降级、`max_tokens` 截断（文档明写别设）、拒绝/空正文。
+
+### 11.5 `model_validate_json`：把两种失败合成一个异常源
+
+```python
+data = Enrollment.model_validate_json(text)   # parse + 校验，一步
+```
+
+| 失败形态 | `err["type"]` | `loc` | `msg` |
+|---|---|---|---|
+| 整段不是 JSON（含空串 / 代码块 / 被注入带偏） | `json_invalid` | `()` 空元组 | 自带 `at line X column Y` |
+| 字段缺失 / 类型不符 | `missing` / `int_parsing` … | `('age',)`，嵌套为 `('courses', 0, 'title')` | 英文说明 |
+
+- 所以一个 `except ValidationError` 就够，不需要手动 `json.loads` 再 `model_validate`；
+- `loc` 是**元组**，元素可能是 `int`（列表下标）⇒ 拼路径前必须 `str()`；
+- 默认**宽松模式**：`"25"` 会被转成 `25` 并接受。想判死要 `strict=True` / `StrictInt`，但本地口径就比发出去的 schema 更严 ⇒ **失败归因会变模糊**（是模型错还是本地多拦了一道）。
+
+### 11.6 pydantic 只查类型，业务口径一律不管
+
+实测 `{"name":"", "age":-3, "courses":[]}` **全部通过** —— 因为类上只有 `str` / `int` / `list[str]`，没有 `min_length` / `ge`（这两个会变成 `minLength` / `minimum`，OpenAI strict 不收，所以故意不写进 schema）。
+
+⇒ 「结构对但内容不合规」只能在校验层补，错误串建议带前缀分桶：`json:`（正文不是 JSON）/ `schema:`（结构与类型）/ `rule:`（业务口径），统计脚本按前缀分组。
+
+### 11.7 实测数字（2026-11-21 · 24 次调用）
+
+| 指标 | 值 |
+|---|---|
+| 通过率（20 次同 prompt） | **20/20**，`finish_reason` 全 `stop` |
+| 耗时中位 | **9982.8 ms**（6909.9 ~ 15181.5） |
+| 输入 token | **102/次（恒定）** ⇒ schema 走 `response_format`，**不占输入 token** |
+| 输出 token | **381 ~ 2032/次（5.3×）** ⇒ reasoning 计在 `completion_tokens` 里，成本要等拆 `reasoning_tokens` |
+| 负例注入 | **3/3 判死**，均带 `at line X column Y` |
+
+### 11.8 官方依据（2026-11-21 查证 · 两条来源）
+
+- 阿里云百炼《结构化输出》— `deepseek-v4.1-flash` / `-1017` 在**北京地域的 OpenAI 兼容 Chat Completions** 上支持 JSON Schema，**思考与非思考模式均支持**；给出关键字白名单与不支持项（不支持的直接 400）；可选字段两种写法；**多模态静默降级**；生产建议「不要设置 `max_tokens`，会导致 JSON 被截断」。
+- Microsoft Learn《Structured outputs》（Azure OpenAI，口径同 OpenAI）— 专节 `ALL FIELDS MUST BE REQUIRED` 与 `ALWAYS SET ADDITIONALPROPERTIES: FALSE`；根节点不能是 `anyOf`；支持 `$defs` / `$ref` 与递归；`refusal` 字段表达拒绝。
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
