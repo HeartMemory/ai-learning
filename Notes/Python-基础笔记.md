@@ -5,7 +5,7 @@
 > 代码实例都在 `practice/` 下的对应目录里，可运行验证。
 > 原则：**只记真实学到的内容与真实踩过的坑**；每个知识点尽量配一条**可实测的判据**。
 
-**覆盖进度**：**第 1 章 语法总览 ✅**（2026-10-29）｜ **第 2 章 list 容器 API ✅**（2026-10-29）｜ **第 3 章 可变性陷阱 ✅**（2026-10-30）｜ **第 4 章 dict·set·tuple（可哈希）✅**（2026-10-30）｜ **第 5 章 async / await 与事件循环 ✅**（2026-10-31）｜ **第 6 章 推导式 / 切片 / 迭代器 ✅**（2026-11-02）｜ 函数进阶（`*args` / 装饰器）/ 模块与包 / httpx / pydantic **未开始**
+**覆盖进度**：**第 1–6 章 ✅**（语法总览 / list 容器 / 可变性 / dict·set·tuple / async / 推导式·切片·迭代器，2026-10-29 ~ 11-02）｜ **第 7 章 httpx ✅**（11-03）｜ **第 8–10 章 ✅**（dataclass·Protocol / 装饰器·闭包 / 异常链·pathlib，11-04 ~ 11-05）｜ **第 11–14 章 ✅**（字面量与迭代顺序 / 空容器·`pairwise` / `zip`·f-string·浮点 / **JSON 落盘**，11-16 ~ 11-21）｜ **仍未展开**：模块与包、pydantic 语言层专章
 
 ## 回访清单（已迁出）
 
@@ -1195,6 +1195,202 @@ f"{值:说明符}"
 
 ---
 
+## 第 14 章 · JSON 落盘：`dump` 与 `load` 到底管什么（2026-11-21）
+
+> 来源场景：L4 关卡 3 的聊天历史要存成 JSON、重启读回。本章每个数字都是本机 **3.14.8** 实测。
+
+### 14.1 四个函数的家谱
+
+| 函数 | 方向 | 吃 / 吐 | 用在 |
+|---|---|---|---|
+| `json.dumps(obj)` | 序列化 | 对象 → **`str`** | 打印、发给 API |
+| `json.loads(s)` | 反序列化 | **`str` / `bytes`** → 对象 | 从字符串、HTTP 响应体解析 |
+| `json.dump(obj, fp)` | 序列化 | 对象 → **写进文件对象** | 落盘 |
+| `json.load(fp)` | 反序列化 | **从文件对象读** → 对象 | 读盘 |
+
+**序列化侧（`dumps` / `dump`）参数完全相同**，`dump` 只多一个 `fp`：
+
+```python
+json.dump(obj, fp, *, skipkeys=False, ensure_ascii=True, check_circular=True,
+          allow_nan=True, cls=None, indent=None, separators=None,
+          default=None, sort_keys=False, **kw)     # 3.6 起全部参数 keyword-only
+```
+
+⚠️ **`json` 只产生 `str`，没有 `encoding` 参数**（官方原话：`fp.write()` 必须接受 `str`）。编码是 `open()` 的事：
+
+```python
+with open("data.json", "wb") as f:      # 二进制流
+    json.dump({"a": 1}, f)
+# TypeError: a bytes-like object is required, not 'str'
+```
+
+反过来 `json.load()` **可以**读二进制文件（3.6+，自己按 UTF-8/16/32 解），`json.loads()` 也收 `bytes`。
+
+### 14.1.1 十一个参数逐个过（本机 3.14.8 实测）
+
+| 参数 | 默认 | 管什么 | 实测 / 关键后果 |
+|---|---|---|---|
+| `obj` | 必填 | 要序列化的对象 | 直通：`dict` / `list` / `tuple`（→ 数组）/ `str` / `int` / `float` / `bool` / `None` 及其嵌套；其余交给 `default` |
+| `fp` | 必填 | 有 `.write()` 的**文本**流 | 只写、不关、不加换行、不管编码；传 `wb` 流 → `TypeError: a bytes-like object is required, not 'str'` |
+| `skipkeys` | `False` | 遇到非法键（非 `str/int/float/bool/None`）怎么办 | `False` → `TypeError: keys must be str, int, float, bool or None, not tuple`；`True` → **静默丢**这个键 |
+| `ensure_ascii` | **`True`** | 非 ASCII 是否转义成 `\uXXXX` | 中文键与值都转义；要可读必须显式 `False`（见 14.2） |
+| `check_circular` | `True` | 容器**循环引用**检查 | 默认 → `ValueError: Circular reference detected`；关掉 → **`RecursionError`**（另一类死法） |
+| `allow_nan` | `True` | 是否允许写 `NaN` / `Infinity` | `True` 写出**不合 JSON 规范**的 `NaN`；`False` → `ValueError: Out of range float values are not JSON compliant: nan`（见 14.7） |
+| `cls` | `None` | 换一个 `JSONEncoder` 子类 | 自定义时重写 `default()`；`cls=E` 与 `default=f` 多数场景**等价**（复数 `1+2j` 两边都出 `[1.0, 2.0]`） |
+| `indent` | `None` | 缩进 | 正整数 = 空格数；字符串 = 缩进字符；`0` / 空串 / 负数 = 只换行（见 14.2） |
+| `separators` | `None` | `(项目间, 键值间)` 两个分隔串 | `None` 时跟 `indent` 联动；`indent=2` + `separators=(",", ":")` → 有缩进、无多余空格 |
+| `default` | `None` | 不可序列化对象的**兜底函数** | 返回值必须自己能序列化；`default=lambda o: o` → `ValueError: Circular reference detected`；不传 → `TypeError: Object of type Turn is not JSON serializable` |
+| `sort_keys` | `False` | 键是否排序 | str 键按**字典序**（`"10"` 在 `"2"` 前）、int 键按**数值序**、混用 → `TypeError: '<' not supported between instances of 'str' and 'int'`（见 14.6） |
+| `**kw` | — | 多出的关键字**透传给 `cls` 构造器** | 不自定义 `cls` 时用不上 |
+
+四条「日常只用默认值、坏起来很安静」：`skipkeys`（丢键）、`check_circular`（关掉变栈溢出）、`allow_nan`（写出非法 JSON）、`default`（返回自己 → 变环）。
+
+**反序列化侧（`loads` / `load`）是另一套参数**，别混：
+
+```python
+json.load(fp, *, cls=None, object_hook=None, parse_float=None, parse_int=None,
+          parse_constant=None, object_pairs_hook=None, **kw)
+```
+
+| 参数 | 用途 |
+|---|---|
+| `object_hook` | 每个 JSON object 解完先过这个函数（返回 dict 的替身） |
+| `object_pairs_hook` | 拿到**有序键值对列表**再让你造对象；与 `object_hook` 同时给时**它优先** |
+| `parse_float` / `parse_int` | 换掉默认的 `float()` / `int()`（如 `decimal.Decimal`） |
+| `parse_constant` | 处理 `Infinity` / `-Infinity` / `NaN` 三个非规范字面量 |
+
+⚠️ `load` / `loads` 的 `encoding` 参数 **3.9 已移除**：实测 `json.load(fp, encoding="utf-8")` → `TypeError: JSONDecoder.__init__() got an unexpected keyword argument 'encoding'`。
+
+### 14.2 三个参数决定「文件长什么样」
+
+| 参数 | 默认 | 实测（同一对象 `{"名": "张三", "note": 'a"b\nc'}`） |
+|---|---|---|
+| `ensure_ascii` | **`True`** | `True` → `{"\u540d": "\u5f20\u4e09", ...}`（键也转义）；`False` → `{"名": "张三", ...}` |
+| `indent` | `None` | 长度 **30**（`None`）／**36**（`indent=2`）／**27**（`separators=(",", ":")`） |
+| `separators` | `None` | `None` 时：`indent is None` → `(', ', ': ')`，否则 `(',', ': ')` |
+
+三条实测细节：
+
+- `indent=0` / `indent=""` / 负数 ⇒ **只换行不缩进**：`{\n"a": 1,\n"b": 2\n}`
+- `indent="\t"` ⇒ 用 tab 缩进（3.2+）
+- `ensure_ascii=True` 转义的是**所有非 ASCII**，中文键名一起转 ⇒ 想看中文必须显式 `ensure_ascii=False`，没有「自动」
+
+### 14.3 编码在 `open()` 里：本机 cp936 的三个坑
+
+```
+locale.getpreferredencoding(False)  →  cp936
+```
+
+| 坑 | 实测 |
+|---|---|
+| `Path.read_text()` **不写 encoding** | 用 gbk 解 UTF-8 文件 → `UnicodeDecodeError: 'gbk' codec can't decode byte 0x8d in position 4` |
+| `Path.write_text()` 不写 encoding | 中文按 cp936 落盘（字节 `b'{"\xc3\xfb": ...}'`）；换环境用 UTF-8 读 → `UnicodeDecodeError` |
+| Windows 换行 | `write_text(..., indent=2)` 默认 `newline=None` ⇒ 落盘是 **CRLF**（`b'{\r\n  "a": 1\r\n}'`）；要 LF 必须 `newline="\n"`（`write_text` 3.10+ / `read_text` 3.13+ 才有） |
+
+⇒ **纪律：读写 JSON 一律显式 `encoding="utf-8"`**；想要可 diff 的文件再补 `newline="\n"`。`write_text` 返回**字符数**（实测 `"abc中文"` → `5`），不是字节数。
+
+带 BOM 的文件（Windows 记事本常见）：
+
+```
+json.loads(Path("bom.json").read_text(encoding="utf-8"))
+# JSONDecodeError: Unexpected UTF-8 BOM (decode using utf-8-sig) line 1 col 1
+json.loads(Path("bom.json").read_text(encoding="utf-8-sig"))   # {'a': 1}
+```
+
+### 14.4 四种边界：各自的异常与位置信息
+
+| 情形 | 结果 |
+|---|---|
+| 文件不存在，`read_text()` | **`FileNotFoundError`**（`OSError` 子类）；先判 `path.exists()` 更省事（3.14 起 `exists()` **不再抛 `OSError`**，一律 `False`） |
+| 文件存在但空 | `JSONDecodeError: Expecting value`，`lineno 1 / colno 1 / pos 0` |
+| 语法坏（多行） | `Expecting value`，**`lineno 2 / colno 13 / pos 21`** |
+| 同一个 `fp` 连着 `dump` 两次 | 内容 `{"a": 1}{"b": 2}` ⇒ 再读 `Extra data: line 1 column 9` —— 官方原话「JSON 不是分帧协议」 |
+
+`JSONDecodeError` 的 `msg` / `doc` / `pos` / `lineno` / `colno` 是**唯一**能定位到字符的证据；它本身是 `ValueError` 的子类（第 10 章那条 `raise ... from` 讲的就是它）。
+
+### 14.5 dataclass 往返：`asdict` ↔ `**d`
+
+```python
+@dataclass(frozen=True, slots=True)
+class Turn:
+    user: str
+    n: int
+    x: float
+```
+
+| 写法 | 结果 |
+|---|---|
+| `json.dumps(Turn("u", 1, 2.5))` | `TypeError: Object of type Turn is not JSON serializable` |
+| `json.dumps(t, default=asdict)` | `{"user": "u", "n": 1, "x": 2.5}` ✅（`default=` 是给不可序列化对象留的钩子） |
+| `asdict(t)` | `{'user': 'u', 'n': 1, 'x': 2.5}`（**递归**拆嵌套 dataclass / dict / list） |
+| `Turn(**d)` | 相等 ✅ |
+| `Turn(*d)` | **不报错**，5 个字段全被填成键名字符串 ⇒ 静默污染（`*` 拆 dict 拆的是**键**） |
+| `Turn(item)` / `Turn(d)` | `TypeError: Turn.__init__() missing 4 required positional arguments` |
+
+往返路上还有一处**静默类型漂移**（JSON 只有数组没有元组）：
+
+```python
+@dataclass(frozen=True, slots=True)
+class T2:
+    tags: tuple[int, ...]
+    meta: dict[str, int]
+
+d = json.loads(json.dumps(asdict(T2((1, 2), {"a": 1}))))
+# d == {'tags': [1, 2], 'meta': {'a': 1}}   ← tuple 变 list，不报错
+T2(**d) == T2((1, 2), {"a": 1})   # False —— list != tuple
+```
+
+⇒ dataclass 注解**运行时零校验**（第 8 章），「读回来还是不是那个类型」只能自己判；要自动转回得靠 `pydantic` 的 `model_validate`（它会按注解转换）。
+
+### 14.6 键的两处身份问题
+
+| 事实 | 实测 |
+|---|---|
+| JSON 的键**只能是字符串** | 写出 `{1: "a", 2: "b"}` → `{"1": "a", "2": "b"}`；读回键是 `str` ⇒ **键类型漂移** |
+| 非法键类型 | `{(1, 2): "x"}` → `TypeError: keys must be str, int, float, bool or None, not tuple`；`skipkeys=True` 则**静默丢掉** |
+| 合法但会变形的键 | `1.5 → "1.5"`、`True → "true"`、`None → "null"` |
+| `sort_keys=True` 的排序口径 | str 键 **字典序**（`"10"` 在 `"2"` 前）；int 键 **数值序**（`2` 在 `10` 前）；混用 → `TypeError: '<' not supported between instances of 'str' and 'int'` |
+
+### 14.7 `NaN` / `Infinity`：默认写出的东西**不是合法 JSON**
+
+```python
+json.dumps([float("inf"), float("-inf"), float("nan")])   # '[Infinity, -Infinity, NaN]'
+json.dumps(float("nan"), allow_nan=False)                 # ValueError: Out of range float values are not JSON compliant: nan
+json.loads("NaN")                                         # nan（默认 parse_constant 收下）
+float("nan") == float("nan")                              # False ⇒ 判等要用 math.isnan
+```
+
+`allow_nan=True`（默认）是与 JS 生态对齐的妥协，**不是** JSON 规范；跨语言传数据（尤其喂给严格解析器）应设 `False`，让越界值在本地就炸。
+
+### 14.8 判据（可复测）
+
+| 判据 | 期望 |
+|---|---|
+| 中文是否被转义 | `json.dumps({"名": "张三"})` 不含中文；加 `ensure_ascii=False` 后含 |
+| 三个参数的长度差 | 同对象：`None` **30** / `indent=2` **36** / `separators=(",", ":")` **27** |
+| `indent=0` | 输出含 `\n`、不含空格缩进 |
+| `indent` + `separators` 联动 | `indent=2, separators=(",", ":")` → 有缩进、冒号后无空格 |
+| 编码纪律 | 不写 encoding 读 UTF-8 中文文件 → `UnicodeDecodeError`；补 `encoding="utf-8"` 正常 |
+| Windows 换行 | `write_text(indent=2)` 字节含 `\r\n`；`newline="\n"` 后只剩 `\n` |
+| BOM | 带 BOM 用 `utf-8` 读 → `Unexpected UTF-8 BOM`；改 `utf-8-sig` 通过 |
+| 边界四态 | 缺失 → `FileNotFoundError`；空 → `Expecting value / 1 / 1 / 0`；坏 → `line 2 col 13 pos 21`；两次 dump → `Extra data line 1 col 9` |
+| `load` 的 `encoding` 已移除 | `json.load(fp, encoding="utf-8")` → `TypeError: JSONDecoder.__init__() got an unexpected keyword argument 'encoding'` |
+| 循环引用两种死法 | 默认 `ValueError: Circular reference detected`；`check_circular=False` → `RecursionError` |
+| `default` 的兜底口径 | `default=lambda o: o` → `ValueError: Circular reference detected`；不传 → `TypeError: Object of type ... is not JSON serializable` |
+| `cls` 与 `default` 等价 | 复数 `1+2j`：两边都出 `[1.0, 2.0]` |
+| `skipkeys` | `False` → `TypeError`（键是 `tuple` 时）；`True` → 该键消失 |
+| dataclass 往返 | `default=asdict` 可 dump；`Turn(**d)` 相等；`Turn(*d)` **不报错但全错** |
+| 类型漂移 | `tuple` 字段往返后是 `list`，`==` 为 **False** |
+| 键排序 | str 键字典序 `{"10", "2"}`；int 键数值序 `{"2", "10"}`；混用 `TypeError` |
+| NaN | 默认输出 `NaN` / `Infinity`；`allow_nan=False` 抛 `ValueError` |
+
+### 14.9 查证出处（2026-11-21 · 两条官方来源）
+
+- `docs.python.org/3/library/json.html`：`dump` 签名与全部参数默认值、`indent` 对 `separators` 默认值的**联动**、`allow_nan` 默认输出 `NaN`/`Infinity` 而**不合规范**、「JSON 不是分帧协议」、`JSONDecodeError` 的五个字段、`encoding` 参数 3.9 已从 `load` 移除
+- `docs.python.org/3/library/pathlib.html`：`read_text` / `write_text` 的 `encoding/errors/newline` 与 `open()` 同义、`write_text` **覆盖同名文件**并返回字符数、`newline` 是 `write_text` **3.10** / `read_text` **3.13** 才有的参数、3.14 起 `exists()` / `is_*()` **吞掉 `OSError` 返回 `False`**
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。
@@ -1209,5 +1405,5 @@ f"{值:说明符}"
 | S0 | 5 | ✅ 已展开为 **第 9 章**（2026-11-05）：装饰器 / 闭包 / `*args·**kwargs` / `functools.wraps` —— ⚠️ 只覆盖到"函数作为值"这半边，**`import` 与模块查找未覆盖**（归下面的编号 6，仍未展开） |
 | S0 | 6 | ⬜ **仍未展开**：模块与包 —— `import` 机制、`sys.modules` 缓存、`__name__`、虚拟环境 |
 | S0 | 7 | ✅ 已展开为 **第 5 章**（2026-10-31）：`async/await` 与 C# `Task` 的异同、事件循环。⚠️ 正文章号按**实际学习顺序**编（第 5 章 ↔ 本表编号 7），两者不再一一对应 |
-| S0 | 8 | httpx 并发抓取 + 存 JSON（S0 交付物） |
-| S0 | 9 | pydantic 数据校验（S1 结构化输出的前置） |
+| S0 | 8 | 🟡 **已拆开落地**：「httpx 并发抓取」在第 7 章（2026-11-03）；「存 JSON」→ 第 **14 章**（2026-11-21） |
+| S0 | 9 | pydantic 数据校验（S1 结构化输出的前置）—— ⚠️ 目前只在 **AI 册**用到（`model_validate_json`），语言层专章**仍未展开** |
