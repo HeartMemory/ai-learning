@@ -24,6 +24,7 @@ runs/
 *.parquet
 *.sqlite
 *.db
+chat_history*.json
 
 # ===== 交接件（含个人信息，不上传）=====
 HANDOVER.md

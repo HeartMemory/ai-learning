@@ -2,7 +2,7 @@
 
 **一句话**：把「调一次模型」做成能演示的命令行 —— 一条命令进去，正文、**输入 token / 输出 token / 耗时**一起出来。
 
-> L4（调用与可控）交付物。四关依次往上加：**关卡 0 打通与记账** → 关卡 1 流式 → 关卡 2 结构化输出 → 关卡 3 成本与 prompt。
+> L4（调用与可控）交付物。五关依次往上加：**关卡 0 打通与记账** → 关卡 1 流式 → 关卡 2 结构化输出 → **关卡 3 多轮与上下文记账** → 关卡 4 成本与 prompt。
 
 ## 怎么跑
 
@@ -56,6 +56,27 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
   - **负例注入**（`uv run python bench_structured.py --guard`，**0 次调用**）：把三种坏 JSON 直接喂校验层 ⇒ **3/3 判死**，错误分别是 `expected , or } at line 1 column 90` / `control character (\u0000-\u001F) ... at line 2 column 0` / `expected value at line 1 column 1`，各给一条「重试 → 降级」路径
   - ⚠️ **口径**：strict 生效时真实输出永远是合法 JSON，所以「三次都通过」证明的是**上游**在挡，**证明不了校验层会拦** —— 门没被撞过就证明不了门结实。两路合起来才是完整证据（改判据不算过，只能补实验）
 
+## 判据（L4 关卡 3 · 多轮与上下文记账）
+
+跑法：`uv run python -m llm_cli chat`（`--history <路径>` 可换历史文件，默认 `<项目根>/chat_history.json`，已 gitignore）
+
+- [x] **① 第 3 轮 input 明显大于第 1 轮**（证明 API 无状态、全历史重发）—— 实测 **41 → 55 → 72**（单调递增，+75%），三轮的数都报 ✅
+- [x] **② 累计上下文 = 各轮 input 之和**（不是最后一轮的值）—— 实测 轮2 `41+55=96` ✔ ｜ 轮3 `41+55+72=168` ✔ ｜ 轮4 `+90=258` ✔ ✅
+- [x] **③ `exit` 后历史存 JSON，重启能读回继续** —— 重启打印「已读回 **3** 轮历史」；读回后第 1 轮（即第 4 轮）input **90 > 72**（带着 3 轮历史）✅
+- [x] **④ 不做压缩；撞上限时打印报错原文** —— 实测 `BadRequestError('Error code: 400 - Range of input length should be [1, 1048576]')`；历史仍 **240** 条、未被改动 ✅
+
+> ⚠️ 口径修正（2026-11-21 实测）：`output`（`completion_tokens`）里混着**思考 token**，而重发的历史只带 `content` ⇒ **每轮 input 的增量 < 上一轮 output**（41→55 只涨 14，output1 是 28）。所以判据 ① 只能按「单调递增 / input3 > input1」判，**不能**用 `input3 − input1 ≥ output1 + output2`。
+> 副作用：这反过来证明「思考过程不入历史」是对的 —— 入了会让 input 白涨一大截。
+
+## 崩溃安全（关卡 3 顺带做的，判据之外）
+
+| 机制 | 做法 | 实测 |
+|---|---|---|
+| 每轮落盘 | 每轮 `append` **之后**立即保存（先打印账单，再存盘） | 聊 2 轮 → 模拟 Ctrl+C → 文件里 **2** 条 |
+| 原子替换 | 写 `*.tmp` 再 `Path.replace()`（同盘 rename，0 字节数据搬运） | 20 MB 文件 replace **0.823 ms**，`st_ino` / `st_mtime` 不变 |
+| 读坏文件容错 | 空文件（`st_size == 0`）当新对话；截断 / 编码错 / 结构不符 → 改名 `*.corrupt-<时间戳>.json` 留证 + 从空对话开始 | 8 种坏法逐条过：截断 / 顶层 dict / 缺字段 / 多字段 / `"abc"` / `bool` 冒充数字 → 全部隔离且不崩 |
+| 异常分层 | 落盘只接 `OSError`（磁盘 / 占用 / 权限）；其它异常**冒泡**（代码 bug 要当场炸） | 让 `save_turns` 抛 `TypeError` → 直接 traceback（fail fast） |
+
 ## 代码地图（哪些要自己写）
 
 | 文件 | 谁写 | 内容 |
@@ -71,8 +92,12 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | `llm_cli/structured.py` → `ask_structured()` | **你** | 组装 `response_format`（`strict: True`）+ 照抄关卡 0 的记账；正文为空**不抛错**，交校验层判死 |
 | `llm_cli/structured.py` → `validate_payload()` | **你** | `model_validate_json` 一步 parse + 校验；错误按 `json:` / `schema:` / `rule:` 三类前缀分桶；业务口径三条自己补 |
 | `bench_structured.py` | AI | 20 次统计（通过率 / 耗时中位 / token / 结束原因 / 首条失败原文）+ 3 种破坏性输入 + `--guard` 负例注入（0 成本） |
+| `llm_cli/llm.py` → `ask_messages()` | **你** | 多轮版 `ask()`：只把 `messages=` 换成入参，记账段一字不动 |
+| `llm_cli/chat.py` → `load_turns` / `save_turns` / `build_messages` / `run_chat` | **你** | 历史读写（`asdict` ↔ `Turn(**d)`）、把历史铺成 `messages`、主循环（三个数 + 每轮落盘 + 失败分支） |
+| `llm_cli/chat.py` → `_turn_from` / `_quarantine` / `_save_or_report` | AI（容错骨架） | 单条记录结构校验（字段集合 + 类型 + `bool` 冒充数字）、坏文件改名留证、保存 + 如实报告（只接 `OSError`） |
+| `llm_cli/cli.py` → `build_chat_parser` / `chat_main` | AI（机械） | `chat` 子命令接线：`--model` / `--history` + 建 client + 交给 `run_chat` |
 
-退出码：`0` 成功 ｜ `1` 其它异常（含 `usage` 缺失、请求失败）｜ `2` 参数 / 配置缺失（argparse 与 `config` 抛的）｜ `3` 跑通了但**正文为空**（已记账）。
+退出码：`0` 成功 ｜ `1` 其它异常（含 `usage` 缺失、请求失败、**历史保存失败**）｜ `2` 参数 / 配置缺失（argparse 与 `config` 抛的）｜ `3` 跑通了但**正文为空**（已记账）。
 
 关卡 0 完成状态（2026-11-19）：`ask()` 与 `main()` 均由本人写完，`uv run ruff check .` 全绿、Pylance **0 诊断**。
 
@@ -131,6 +156,26 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | 输出 token 波动 | 同一 prompt 差 5.3 倍 ⇒ 思考模式的 reasoning token 计在 `completion_tokens` 里；本关耗时数字**不能**当「结构化输出的成本」，要等关卡 3 拆 `reasoning_tokens` |
 | schema 的 token 成本 | 输入恒 102（四个不同 prompt 也一样）⇒ schema 走 `response_format` 传，**不计入输入 token** |
 
+## 实测数字（L4 关卡 3 · 2026-11-21 · `uv run python -m llm_cli chat`）
+
+模型 `deepseek-v4.1-flash-1017`（思考模式 = 供应商默认），prompt 固定三句「只回答数字：1+1 / 3 的平方 / 100−37」，第四句「7 乘 8」。
+
+| 轮 | 本轮 input | 本轮 output | 累计上下文（Σ各轮 input） | 耗时 |
+|---|---|---|---|---|
+| 1 | **41** | 28 | 41 | 755.70 ms |
+| 2 | **55** | 20 | 96（=41+55） | 542.51 ms |
+| 3 | **72** | 21 | 168（=41+55+72） | 487.36 ms |
+| 4（重启后） | **90** | 20 | 258（=41+55+72+90） | 683.00 ms |
+
+| 结论 | 数字 |
+|---|---|
+| 判据 ①（input 递增） | 41 → 55 → 72 → 90，第 3 轮比第 1 轮 **+75%** |
+| 判据 ②（累计 == 求和） | 三次核对全等（96 / 168 / 258），差 **0** |
+| 判据 ③（重启读回） | 「已读回 **3** 轮历史」；读回后第 1 轮 input **90 > 72** |
+| 判据 ④（撞上限原文） | `Range of input length should be [1, 1048576]`（**上限 1M**）；历史仍 **240** 条 |
+| 每轮 input 增量 vs 上轮 output | 轮2 只涨 **14**，而 output1 = **28** ⇒ 思考 token **不随历史重发**（`completion_tokens` 含 reasoning，`content` 只占一小部分） |
+| 成本 | 6 次成功调用，输入合计 ≈ **1.277 M token**（按 1 元/百万 ≈ **¥1.28**）；400 那次预计不计费 |
+
 ## 设计取舍（判据要的是「做过选择」，每条都得能自己讲清）
 
 | 决策 | 选了什么 | 理由 |
@@ -149,6 +194,13 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | 多模态下的静默降级 | 不特判，靠 `validate_payload` 兜 | 带图 / 视频 / 音频时供应商把 `json_schema` 静默降级成 `json_object`（不报错）；这是文档注明的行为，不猜、也不改判据 |
 | 结构化输出要不要流式 | 不做 | 判据只看最终一段 JSON；流式下 JSON 是分片，只能拼完再 parse，还要多处理 role 帧 / `content=None` 帧，不换来任何东西 |
 | 坏 JSON 到底是「模型错」还是「输入难」 | 不区分，只回答「这段正文能不能进业务」 | 归因是 `bench` 的活（前缀 + `finish_reason`）；校验层做归因会把自己和供应商绑死 |
+
+| 多轮历史存哪 | 整份 JSON **数组**，每轮整份重写（tmp + replace） | 判据 ③ 要「存成 JSON」，数组便于对数（条数 == 记录数）；一个会话几十 KB，重写成本可忽略 |
+| 思考过程要不要拼回历史 | **不拼**，只发 `content` | 供应商口径只要 `content`；实测拼了会让 input 白涨（reasoning 计费但不必重发）。反证：input 增量 < 上轮 output |
+| 半截回答能不能入历史 | **不入**（`append` 只发生在拿到完整 `Answer` 之后） | 半截 assistant 内容会被模型当成"自己说过的话"，下轮顺着半句继续编；将来接流式也要守这条 |
+| 落盘失败怎么办 | 打印「历史保存失败」+ 退出码 1，**不吞** | 请求已经花过钱，三个数必须先打印；保存失败是环境问题，要说清而不是装没事 |
+| 坏历史文件怎么处理 | 改名 `*.corrupt-<时间戳>.json` 留证 + 从空对话开始 | 删了就没法查"是写盘被打断还是手改坏"；`raise` 会让一次截断永久封死启动 |
+| `chat` 要不要做成流式 | **本轮不做** | 思考模式下纯 reasoning 帧 `content=None`，流式照样干等；中断还拿不到 usage ⇒ 判据 ①②③ 缺数。留到关卡 4 按 `reasoning_tokens` 的实测再决定 |
 
 ## 踩坑
 
@@ -174,3 +226,12 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | 坏 JSON 抛的不是 `JSONDecodeError` | `model_validate_json` 统一包成 `ValidationError`，`type == "json_invalid"`、`loc` 是空元组、行列信息在 `msg` 里（`at line X column Y`） |
 | 空姓名 / 负年龄 / 空课程**全部通过校验** | pydantic 只按类型注解校验，业务口径一律不管（实测 `{"name":"", "age":-3, "courses":[]}` 全绿）⇒ 这三条必须自己补 |
 | 本地校验比服务器松 | 宽松模式把 `"25"` 收成 `25`；要判死得 `strict=True` / `StrictInt`，但那样本地口径就比发出去的 schema 更严，「失败」无法归因 |
+| 每轮都打印「保存成功」，崩溃后却少最后一轮 | `save_turns` 写在 `turns.append(...)` **之前** ⇒ 文件永远落后一轮；`exit` 时会补存一次完整的，正好把问题藏住 ⇒ 崩溃测试必须用 **Ctrl+C**，不能只用 exit |
+| `open(path, "w")` 写历史，崩一次历史全没 | `"w"` 一打开就清空原文件；改 `*.tmp` + `Path.replace()`（同盘 rename 原子，20 MB 仅 **0.823 ms**、`st_ino` 不变） |
+| Windows 上 `replace` 报 `[WinError 5] 拒绝访问` | 目标文件被别的程序占用（编辑器预览 / 杀毒 / 另一个 `chat` 进程）⇒ rename 被拒；POSIX 下开着句柄仍可改名，Windows 不行 |
+| 代码 bug 被报成「历史保存失败」 | `except Exception` 把 `TypeError` 也接了 ⇒ 故障现场消失；落盘只该接 `OSError`，其余冒泡（fail fast） |
+| 读自己写的 JSON 报 `UnicodeDecodeError` | `Path.read_text()` 不传 `encoding` 用 locale 默认（本机 **cp936**）；写 utf-8 读 gbk 必崩 |
+| 空文件与截断文件报同一个 `JSONDecodeError` | 都是 `Expecting value`；要先用 `path.stat().st_size == 0` 分开，否则会把"本来就没内容"当成损坏去隔离 |
+| 判据 ② 的累计值越滚越偏 | 把 `answer.completion_tokens` 也加进「累计上下文」；那是本轮 output（还混着思考 token）。累计只算 `Σ prompt_tokens` |
+| `Turn(*item)` 不报错但字段全错 | `*` 拆 dict 拆的是**键**（字符串）⇒ 5 个字段被填成键名；要 `**item` |
+| 20 万 token 的「超长历史」居然调用成功 | 该模型上限 **1 048 576**（1M）；375 K / 900 K 都合法。要真撞上限得按官方模型页的数字造数据 |

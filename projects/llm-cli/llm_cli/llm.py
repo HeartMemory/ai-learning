@@ -83,6 +83,46 @@ def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
     )
 
 
+def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) -> Answer:
+    """发一次**多轮**请求：`messages` = 完整历史 + 本次提问，返回 `Answer`。
+
+    判据（L4 关卡 3）：每轮都要能从 `usage.prompt_tokens` 读到**整段历史**的 token 数 ——
+    所以 `messages` 必须原样交给 SDK，**不许**在这里偷偷只发最后一条。
+
+    实现要点（与 `ask()` 的差别只有一处，**别把记账重写一遍**）：
+      · `messages=` 收整张消息表（不是 `[{"role": "user", "content": prompt}]` 一条）
+      · 其余照抄：计时包住整次请求 → 空 `choices` 就抛 → `usage is None` 就抛 →
+        `content or ""` 兜底 → `finish_reason` 从 `choices[0]` 取
+
+    镜子：同文件的 `ask()`（一字不差的记账段）。写完后可以把 `ask()` 改成一行转调，
+    两边就只剩一份实现：
+        return ask_messages([{"role": "user", "content": prompt}], model=model, client=client)
+    """
+    # TODO(你写)：照 `ask()` 的镜子，只把 messages 换成入参
+    started = time.perf_counter()
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if not response.choices:
+        raise RuntimeError("供应商返回了空 choices")
+    message = response.choices[0].message
+    usage = response.usage
+    if usage is None:
+        raise RuntimeError("供应商没返回 usage，无法记账（判据 ① 要平台数字）")
+    text = message.content or ""
+
+    return Answer(
+        text=text,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+        elapsed_ms=elapsed_ms,
+        finish_reason=response.choices[0].finish_reason,
+    )
+
+
 def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
     """流式发一次请求：边到边收增量，同时记「首 token 何时到」与「总共多久」。
 

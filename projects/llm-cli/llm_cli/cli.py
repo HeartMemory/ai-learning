@@ -5,10 +5,13 @@
 """
 
 import argparse
+import sys
+from pathlib import Path
 
 from openai import OpenAI
 
-from .config import load_settings
+from .chat import run_chat
+from .config import PROJECT_ROOT, load_settings
 from .llm import ask, ask_stream
 
 
@@ -28,6 +31,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_chat_parser() -> argparse.ArgumentParser:
+    """`chat` 子命令的参数（机械部分，AI 代写）。"""
+    parser = argparse.ArgumentParser(
+        prog="llm_cli chat",
+        description=(
+            "多轮对话 + 上下文记账（L4 关卡 3）："
+            "每轮报本轮 input / 本轮 output / 累计上下文"
+        ),
+    )
+    parser.add_argument("--model", default=None, help="临时覆盖 .env 里的 LLM_MODEL")
+    parser.add_argument(
+        "--history",
+        default=None,
+        help="历史 JSON 路径（默认 <项目根>/chat_history.json，已 gitignore）",
+    )
+    return parser
+
+
+def chat_main(argv: list[str]) -> int:
+    """`chat` 子命令的胶水：读参数 → 建 client → 交给 `chat.run_chat()`（AI 代写）。"""
+    args = build_chat_parser().parse_args(argv)
+    settings = load_settings()
+    client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
+    history_path = Path(args.history) if args.history else PROJECT_ROOT / "chat_history.json"
+    return run_chat(
+        model=args.model or settings.model,
+        client=client,
+        history_path=history_path,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """跑一次真实调用，并把三个数打在终端上。
 
@@ -38,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     再判成败** —— 正文为空只代表这条命令失败，账已经花出去了，所以先打印后判定。
     退出码：`0` 有正文 ｜ `3` 正文为空（已记账）｜ `2` 参数/配置缺失（上游抛）｜ `1` 其它异常。
     """
-    args = build_parser().parse_args(argv)
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if argv_list[:1] == ["chat"]:
+        return chat_main(argv_list[1:])
+
+    args = build_parser().parse_args(argv_list)
     settings = load_settings()
     client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
