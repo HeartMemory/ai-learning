@@ -44,7 +44,7 @@ ai-learning/
 | **L6** | 检索与 RAG：切分 / embedding / 检索 / 失败归因三分法 | 待拆 | `projects/rag-notes/` | ⬜ |
 | **L7** | 评测与安全：eval 一套 + 提示注入红队 | 待拆 | `projects/agent-eval/` | ⬜ |
 | **L8** | 微调：QLoRA 把输出改成指定 JSON 格式 | 待拆 | `projects/qlora-format/` | ⬜ |
-| 应用 | **空缺**，等具体内容再规划 | — | — | — |
+| 应用 | coach（专注辅助学习的工具，先 CLI 后本地界面，含提醒）—— 最早 L9 之后 | — | — | — |
 | 已完成 | S0 Python 语言层（12 个练习） | 判据全绿 + 变异测试全红 | `practice/python/` | ✅ |
 
 ## 环境要求与本地运行
