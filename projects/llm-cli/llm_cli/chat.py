@@ -27,6 +27,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from .billing import bill, format_bill
 from .llm import ask_messages
 
 
@@ -203,6 +204,8 @@ def run_chat(*, model: str, client: OpenAI, history_path: Path) -> int:
             print(f"output: {answer.completion_tokens}")
             print(f"累计上下文: {total_prompt}")
             print(f"本轮耗时: {answer.elapsed_ms:.2f} ms")
+            # 档位按「现在」判（与调用时刻差几秒；跨 22:00 / 08:00 边界时可能差一档）
+            print(format_bill(bill(answer)))
         except Exception as exc:
             print(f"请求失败: {exc!r}")
             _save_or_report(history_path, turns)

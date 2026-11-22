@@ -19,7 +19,17 @@ from openai import OpenAI
 
 @dataclass(frozen=True, slots=True)
 class Answer:
-    """一次调用的产出：正文 + 三个 token 数 + 端到端耗时（ms）。"""
+    """一次调用的产出：正文 + 三个 token 数 + 端到端耗时（ms）+ 成本要的两个细分。
+
+    最后三个字段是 L4 关卡 4 加的（2026-11-22）：
+      · `model`：**上游回传的实际模型名**（`response.model`），账单只认它 ——
+        我们请求时传的可能是别名，网关可能改写成快照名，回传的才是它真正服务的那个
+    后两个默认 `None`，表示**供应商没给**：
+      · `reasoning_tokens`：思考 token，**已包含在** `completion_tokens` 里（官方口径），
+        拆出来只用于解释波动，**不参与计价**
+      · `cached_tokens`：输入里命中上下文缓存的部分，单价与未命中差 **50 倍**
+      · ⚠️ `None` ≠ 0：填 0 等于宣称"思考免费 / 全按新价"，账单会静默偏低
+    """
 
     text: str
     prompt_tokens: int
@@ -27,6 +37,9 @@ class Answer:
     total_tokens: int
     elapsed_ms: float
     finish_reason: str
+    model: str
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +49,10 @@ class StreamAnswer:
     ⭐ 与 `Answer` 的两处差别（都是踩出来的，不是设计洁癖）：
       · token 三数是 `int | None` —— 流被打断时**官方不给 usage 汇总帧**，那时没有账单可记
       · 多个 `completed` —— 「循环自然结束」不等于「成功」，只有收到 `finish_reason` 才算走完
+
+    后三个字段是 L4 关卡 4 加的（三条路径都要算账，字段与 `Answer` 对齐）：
+      · `model`：取**任意一帧**的 `chunk.model`（上游回传），账单只认它
+      · `reasoning_tokens` / `cached_tokens`：来自汇总帧，拿不到就是 `None`
     """
 
     text: str
@@ -47,39 +64,30 @@ class StreamAnswer:
     total_tokens: int | None
     finish_reason: str | None
     completed: bool
+    model: str | None = None
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
 
 
 def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
     """发一次请求，返回 `Answer`。
 
-    实现要点（2026-11-19 定稿）：
+    ⚠️ 2026-11-22 改为**一行转调 `ask_messages()`** —— 记账段只在那边维护一份。
+    原来这里另有一份一字不差的实现，两边一改就漂移（同一段类型收窄，写法差一个词，
+    一边绿一边红：`usage.xxx` 收窄生效，`response.usage.xxx` 不生效）。
+
+    记账要点仍在 `ask_messages()` 里：
       · 计时包住**整次请求**（起点在 create 之前，终点在它返回之后）
       · 正文可能为 `None`（拒答 / 只回工具调用 / 网关不给）⇒ `or ""` 兜底，**不抛错**：
         这些情况下 token 照扣，抛错会把账单一起扔掉
       · 三个 token 数取自 `usage`（`usage is None` 才抛 —— 那时真无法记账）
       · `finish_reason` 在 `choices[i]` 上，**不在 `message` 上**
+      · `model` 取**上游回传**的 `response.model`，不是入参
     """
-    started = time.perf_counter()
-    response = client.chat.completions.create(
+    return ask_messages(
+        [{"role": "user", "content": prompt}],
         model=model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    if not response.choices:
-        raise RuntimeError("供应商返回了空 choices")
-    message = response.choices[0].message
-    usage = response.usage
-    if usage is None:
-        raise RuntimeError("供应商没返回 usage，无法记账（判据 ① 要平台数字）")
-    text = message.content or ""
-
-    return Answer(
-        text=text,
-        prompt_tokens=usage.prompt_tokens,
-        completion_tokens=usage.completion_tokens,
-        total_tokens=usage.total_tokens,
-        elapsed_ms=elapsed_ms,
-        finish_reason=response.choices[0].finish_reason,
+        client=client,
     )
 
 
@@ -89,16 +97,12 @@ def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) 
     判据（L4 关卡 3）：每轮都要能从 `usage.prompt_tokens` 读到**整段历史**的 token 数 ——
     所以 `messages` 必须原样交给 SDK，**不许**在这里偷偷只发最后一条。
 
-    实现要点（与 `ask()` 的差别只有一处，**别把记账重写一遍**）：
+    实现要点（2026-11-22 起**本函数是唯一实现**，`ask()` 一行转调到这里）：
       · `messages=` 收整张消息表（不是 `[{"role": "user", "content": prompt}]` 一条）
-      · 其余照抄：计时包住整次请求 → 空 `choices` 就抛 → `usage is None` 就抛 →
+      · 计时包住整次请求 → 空 `choices` 就抛 → `usage is None` 就抛 →
         `content or ""` 兜底 → `finish_reason` 从 `choices[0]` 取
-
-    镜子：同文件的 `ask()`（一字不差的记账段）。写完后可以把 `ask()` 改成一行转调，
-    两边就只剩一份实现：
-        return ask_messages([{"role": "user", "content": prompt}], model=model, client=client)
+      · `model` 与两个 token 细分都取**上游回传**的，不取入参 / 不自算
     """
-    # TODO(你写)：照 `ask()` 的镜子，只把 messages 换成入参
     started = time.perf_counter()
     response = client.chat.completions.create(
         model=model,
@@ -113,6 +117,12 @@ def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) 
         raise RuntimeError("供应商没返回 usage，无法记账（判据 ① 要平台数字）")
     text = message.content or ""
 
+    # 两个细分**先落成局部变量**再判 None：
+    #   `usage` 上面已判空，但 `usage.xxx` 每写一次都是重新访问属性，类型收窄不会带过去；
+    #   写成 `response.usage.xxx` 更是连"判空过的那个变量"都不是 ⇒ Pylance 必红（README 踩坑表同条）
+    c_details = usage.completion_tokens_details
+    p_details = usage.prompt_tokens_details
+
     return Answer(
         text=text,
         prompt_tokens=usage.prompt_tokens,
@@ -120,6 +130,9 @@ def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) 
         total_tokens=usage.total_tokens,
         elapsed_ms=elapsed_ms,
         finish_reason=response.choices[0].finish_reason,
+        model=response.model,
+        reasoning_tokens=c_details.reasoning_tokens if c_details else None,
+        cached_tokens=p_details.cached_tokens if p_details else None,
     )
 
 
@@ -160,6 +173,10 @@ def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    # 局部变量别叫 model —— 会盖住入参 `model`（那是请求名，账单要的是回传名）
+    resp_model: str | None = None
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
 
     stream = client.chat.completions.create(
         model=model,
@@ -169,12 +186,17 @@ def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
     )
     for chunk in stream:
         chunks += 1
+        resp_model = chunk.model or resp_model
         if not chunk.choices:
             usage = chunk.usage
             if usage is not None:
                 prompt_tokens = usage.prompt_tokens
                 completion_tokens = usage.completion_tokens
                 total_tokens = usage.total_tokens
+                c_details = usage.completion_tokens_details
+                p_details = usage.prompt_tokens_details
+                reasoning_tokens = c_details.reasoning_tokens if c_details else None
+                cached_tokens = p_details.cached_tokens if p_details else None
             continue
         delta = chunk.choices[0].delta
         if delta.content is not None:
@@ -195,4 +217,7 @@ def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
         total_tokens=total_tokens,
         finish_reason=finish_reason,
         completed=finish_reason is not None,
+        model=resp_model,
+        reasoning_tokens=reasoning_tokens,
+        cached_tokens=cached_tokens,
     )

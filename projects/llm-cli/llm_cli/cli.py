@@ -10,6 +10,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from .billing import bill, format_bill
 from .chat import run_chat
 from .config import PROJECT_ROOT, load_settings
 from .llm import ask, ask_stream
@@ -92,6 +93,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"结束原因: {answer.finish_reason}")
         print(f"completed: {answer.completed}")
 
+        # 流被打断 ⇒ 拿不到 usage 汇总帧，这笔钱**算不出来**（不许编 0 冒充当次免费）
+        if answer.model is None or answer.prompt_tokens is None or answer.completion_tokens is None:
+            print("费用: 无账单（流未走完 / 供应商没给 usage 或模型名）")
+        else:
+            print(f"其中思考 token: {answer.reasoning_tokens}")
+            print(format_bill(bill(answer)))
+
         if answer.completed and answer.text:
             return 0
         return 3
@@ -101,8 +109,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"正文: {answer.text}")
     print(f"输入 token: {answer.prompt_tokens}")
     print(f"输出 token: {answer.completion_tokens}")
+    print(f"其中思考 token: {answer.reasoning_tokens}")  # None = 供应商没给，不是 0
     print(f"耗时(ms): {answer.elapsed_ms}")
     print(f"结束原因: {answer.finish_reason}")
+    print(f"模型: {answer.model}")
+    print(format_bill(bill(answer)))  # 缓存命中数也在这一行里
 
     if not answer.text:
         return 3
