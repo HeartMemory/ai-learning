@@ -5,7 +5,7 @@
 > 代码实例都在 `practice/` 下的对应目录里，可运行验证。
 > 原则：**只记真实学到的内容与真实踩过的坑**；每个知识点尽量配一条**可实测的判据**。
 
-**覆盖进度**：**第 1–6 章 ✅**（语法总览 / list 容器 / 可变性 / dict·set·tuple / async / 推导式·切片·迭代器，2026-10-29 ~ 11-02）｜ **第 7 章 httpx ✅**（11-03）｜ **第 8–10 章 ✅**（dataclass·Protocol / 装饰器·闭包 / 异常链·pathlib，11-04 ~ 11-05）｜ **第 11–14 章 ✅**（字面量与迭代顺序 / 空容器·`pairwise` / `zip`·f-string·浮点 / **JSON 落盘**，11-16 ~ 11-21）｜ **仍未展开**：模块与包、pydantic 语言层专章
+**覆盖进度**：**第 1–6 章 ✅**（语法总览 / list 容器 / 可变性 / dict·set·tuple / async / 推导式·切片·迭代器，2026-10-29 ~ 11-02）｜ **第 7 章 httpx ✅**（11-03）｜ **第 8–10 章 ✅**（dataclass·Protocol / 装饰器·闭包 / 异常链·pathlib，11-04 ~ 11-05）｜ **第 11–14 章 ✅**（字面量与迭代顺序 / 空容器·`pairwise` / `zip`·f-string·浮点 / **JSON 落盘**，11-16 ~ 11-21）｜ **第 15–16 章 ✅**（`strip`·`removeprefix`·`partition` / **datetime 时区**，11-22）｜ **仍未展开**：模块与包、pydantic 语言层专章
 
 ## 回访清单（已迁出）
 
@@ -1388,6 +1388,77 @@ float("nan") == float("nan")                              # False ⇒ 判等要�
 
 - `docs.python.org/3/library/json.html`：`dump` 签名与全部参数默认值、`indent` 对 `separators` 默认值的**联动**、`allow_nan` 默认输出 `NaN`/`Infinity` 而**不合规范**、「JSON 不是分帧协议」、`JSONDecodeError` 的五个字段、`encoding` 参数 3.9 已从 `load` 移除
 - `docs.python.org/3/library/pathlib.html`：`read_text` / `write_text` 的 `encoding/errors/newline` 与 `open()` 同义、`write_text` **覆盖同名文件**并返回字符数、`newline` 是 `write_text` **3.10** / `read_text` **3.13** 才有的参数、3.14 起 `exists()` / `is_*()` **吞掉 `OSError` 返回 `False`**
+
+---
+
+## 第 15 章 · 边界三件套：`strip` / `removeprefix` / `partition`（2026-11-22）
+
+### `strip(chars)` 的参数是**字符集合**，不是子串
+
+```python
+s = "```json\n{\"category\": \"billing\"}\n```"
+s.strip("` \n")        # → 'json\n{"category": "billing"}'   ← 剥到 j 就停
+s.strip("\n")          # → 原样（首尾不是换行，第一个字符就停）
+s.strip("` \njson")    # → '{"category": "billing"}'        ← 看着"对了"，其实是巧合
+```
+
+- 它从两端反复剥，**遇到不在集合里的字符就停**；不看顺序、不看语义；
+- 把 `json` 加进集合能"凑对"，但会把正文两端的 `j`/`s`/`o`/`n` 一并削掉 —— 实测 `'{"category": "tech"}n'`（不合法）被剥成合法 JSON，**假绿**。
+
+### 字面量区分
+
+| 写法 | 实际字符 |
+|---|---|
+| `"\n"` | 1 个：换行 |
+| `"\\n"` | 2 个：反斜杠 + n |
+| `"` \n"` | **3 个**：反引号、空格、换行 |
+
+### 该用哪个
+
+| 需求 | 工具 |
+|---|---|
+| 去两端空白 | `strip()`（无参数） |
+| 去**固定前缀/后缀**（子串语义） | `removeprefix()` / `removesuffix()`（3.9+） |
+| 判断后精确切 | `startswith()` / `endswith()` + 切片 |
+| 按第一个分隔符切三段 | `partition(sep)` → `(before, sep, after)`，`_` 接分隔符正好丢掉 |
+
+**判据**：想验证"剥完还能解析"，先问一句 —— **原文本身合法吗？** 不合法就被"剥"成合法，等于把校验层变成了修复层。
+
+---
+
+## 第 16 章 · `datetime` 的 naive / aware：`replace` 贴标签，`astimezone` 才换算（2026-11-22）
+
+### 两种时间
+
+| 类型 | 怎么来 | `.hour` 是哪个时区的钟点 |
+|---|---|---|
+| **naive** | `datetime.now()`、`datetime(2026,11,22,23,0)` | 你**以为**的那个 |
+| **aware** | `datetime.now(tz=UTC)`、带 `tzinfo=` 构造 | **它自己那个时区**的 |
+
+### 两个方法别搞混
+
+- `dt.replace(tzinfo=tz)` = **只贴标签，不换算**。`datetime(2026,11,22,15,0).replace(tzinfo=UTC)` 表示"UTC 15:00"，不是"北京时间 15:00"；
+- `dt.astimezone(tz)` = **真换算**。`UTC 15:00` → 北京 `23:00`。
+
+⇒ 判断"现在是不是北京时间闲时"这类问题，aware 时间必须先 `astimezone(北京时间)` 再取 `.hour`，否则拿到的是别的时区的钟点（实测把北京 23:00 判成忙时）。
+
+### Windows 上没有 IANA 时区库
+
+```python
+from zoneinfo import ZoneInfo
+ZoneInfo("Asia/Shanghai")   # Windows: ZoneInfoNotFoundError: No time zone found
+```
+
+- `zoneinfo` 依赖系统的 tz 数据库；**Windows 不自带**，要额外装 `tzdata` 包；
+- 没有跨时区需求时，`timezone(timedelta(hours=8))` 固定偏移更省事（中国 1991 年起无夏令时）；
+- 判据：`UTC 15:00` 折算后应判为**闲时**（北京 23:00）。
+
+### 跨零点区间
+
+```python
+hour >= 22 or hour < 8      # ✅
+22 <= hour < 8              # ❌ 永远 False
+```
 
 ---
 
