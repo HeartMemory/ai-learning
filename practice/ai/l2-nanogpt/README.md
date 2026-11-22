@@ -9,7 +9,7 @@
 | # | 关卡 | 状态 |
 |---|---|---|
 | **0** | 环境（cu128 轮子 / capability / 冒烟） | ✅ 绿（判据 2/2） |
-| 1 | 单头算术（手算 vs torch、缩放要有数字） | ⬜ |
+| 1 | 单头算术（手算 vs torch、缩放要有数字） | ✅ 绿（判据 2/2 · 2026-11-22） |
 | 2 | 掩码与位置（因果掩码、置换等变 vs 位置编码） | ⬜ |
 | 3 | 最小 block（形状 / 参数量 / LayerNorm / gradcheck） | ⬜ |
 | 4 | 真训练（tinyshakespeare 2000 步、显存 < 6 GiB、val CE < bigram） | ⬜ |
@@ -33,8 +33,36 @@
 cd practice/ai/l2-nanogpt
 uv sync                      # 首次拉 cu128 轮子，约 2–3 GB
 uv run python env_probe.py   # 关卡 0：判据 2/2 绿
+uv run python attention.py   # 关卡 1：判据 2/2 绿（①手算对账 ②缩放与熵）
 uv run ruff check .
 ```
+
+## 实测数字（关卡 1 · 2026-11-22）
+
+| 判据 | 实测 |
+|---|---|
+| ① 权重逐元素差（手算 vs torch） | **5.551e-17**（阈值 1e-12） |
+| ① 输出逐元素差 | **2.220e-16** |
+| ① 行和偏差 | torch **2.220e-16** ／ 手算 **0** |
+| ② std（d=2/8/64/512，10 seed 平均） | **1.391 / 2.841 / 7.938 / 22.649**（理论 √d = 1.414 / 2.828 / 8.000 / 22.627） |
+| ② 除以 √d 后的 std | **0.984 / 1.004 / 0.992 / 1.001**（与 d 无关） |
+| ② 比值误差 | **2.09% / 0.86% / 1.75%**（阈值 5%） |
+| ② d=512 未缩放 | maxw **1.0000**（≥0.9）· 熵 **0.2454 bit**（≤1） |
+| ② d=512 除 √d 后 | maxw **0.2747**（≤0.5）· 熵 **5.3109 bit**（≥5，上界 log2(64)=6） |
+
+### 判据 ② 的口径（写死成常量，改必须写理由）
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `TOKENS` | 64 | 熵上界 = log2(64) = 6 bit |
+| `SEEDS` | 10 | ① 取平均的 seed 数（单 seed 噪声 ±15%，见下） |
+| `RATIO_TOL` | 0.05 | 实测比与理论 √(d₂/d₁) 的相对误差上限 |
+| `MAXW_COLLAPSE` | 0.9 | 未缩放时「坍缩」的 max weight 门槛 |
+| `H_COLLAPSE` | 1.0 bit | 未缩放时「坍缩」的熵门槛 |
+| `MAXW_REVIVED` | 0.5 | 除 √d 后 max weight 要掉到其下 |
+| `H_REVIVED` | 5.0 bit | 除 √d 后熵要回升到其上 |
+
+**为什么必须多 seed**：单 seed 的 std 比值实测在 **14.8 ~ 18.4** 之间乱摆（理论 16），`(64,64)` 里同一行的格子共享同一个 `q` 行向量、**不是独立样本**。10 seed 平均后落进 5%；30 seed 平均 15.98。
 
 ## 文档依据（2026-11-19 查证）
 
@@ -53,4 +81,7 @@ uv run ruff check .
 | **PyPI 默认渠道的 torch ≠ cu128** | 不写 `[[tool.uv.index]]` + `[tool.uv.sources]` 就会装默认轮子；在 sm_120 上第一次 GPU 运算报 `no kernel image is available` —— **看着像代码错，其实是轮子错** |
 | **`1024³` 在中文 Windows 控制台直接崩** | `UnicodeEncodeError: 'gbk' codec can't encode character '\xb3'`（`³` 编不出来）⇒ 打印文本只用 ASCII 上标 `1024^3` |
 | **torch 不自动装 numpy** | 导入即告警 `Failed to initialize NumPy: No module named 'numpy'`；`uv add numpy` 后消失（关卡 4 的 char-level 数据也要用） |
+| **判据脚本里打 `✓`/`✗` 会崩** | 中文 Windows 控制台是 GBK，`✓`（U+2713）/`✗`（U+2717）触发 `UnicodeEncodeError: 'gbk' codec can't encode character` ⇒ 判据输出只用 ASCII 标记（`OK` / `NG`）。与本目录 `1024³` 那条是同一个坑 |
+| **单 seed 的统计量会被采样噪声主导** | `std` 比值同一份代码在 **14.8~18.4** 间跳（理论 16）—— `(64,64)` 同行共享同一 `q` 行，有效样本远小于 4096。⇒ 统计类判据一律**多 seed 取平均**再定阈值，先测噪声再定口径 |
+| **`w.numel()` 不是行数** | 熵要按「行」平均（`w.shape[0]`）；误除 `numel()`（4096）会把 6 bit 缩成 0.094，跨 token 数不可比 |
 | **hardlink 降级警告** | 缓存与 venv 不在同一分区 ⇒ `Failed to hardlink files; falling back to full copy`（只影响安装耗时，不影响正确性；要消掉设 `UV_LINK_MODE=copy`） |
