@@ -1129,6 +1129,107 @@ cost(元) = (cached × p_缓存 + (prompt − cached) × p_入 + completion × p
 
 ---
 
+## 第 16 章 · torch 张量 API：L2 关卡 1–2 用得到的那一套（2026-11-23）
+
+> 只收「本关真用过、能把判据写成数字」的 API。没用过的（`register_buffer` / `gradcheck` / 多头 reshape / KV cache）**不提前占位** —— 那属于关卡 3–4 / L5。
+
+### 16.1 速查表
+
+**建张量**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `torch.tensor(list, dtype=...)` | Python list → 张量 | 不写 dtype 就是全局默认 `torch.float32` |
+| `torch.randn(shape, generator=g, dtype=)` | 从 **N(0,1)** 采样（不是任意值） | 多数落在 ±1、95% 落在 ±2 |
+| `torch.Generator().manual_seed(seed)` | 独立随机源 | **不显式传 `generator=g` 就不生效**，退回全局源 |
+| `torch.arange(1, T+1)` | 等差数列，做「期望值」 | 终点要 +1 |
+| `torch.ones(shape, dtype=torch.bool)` | 全 True | 默认 dtype 是 **float32**，不写 `dtype` 得到的是 1.0 |
+
+**形状**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `x.shape` | 形状元组 | 前面的数是**数量**（B / T / heads），`shape[-1]` 才是**特征维 d** |
+| `x.T` | 2D = 转置 | **ndim≠2 已 deprecated**（本机 torch 2.11 实测告警）⇒ 高维用 `x.mT` 或 `x.transpose(-2,-1)` |
+| `x.shape[-1]` / `x.size(-1)` | 取特征维 | 缩放因子 `1/√E` 的 E 就是它 |
+
+**相乘**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `a @ b`（= `torch.matmul`） | 批量矩阵乘 | 在最后两维上做 |
+| `a * b` | **逐元素**乘 | 不是矩阵乘；配 `.sum()` 才是手写点积 |
+
+**归一与统计**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `x.softmax(dim=-1)` | 沿最后一维归一，行和 = 1 | `dim` 选错就是沿错方向归一 |
+| `x.log2()` | 以 2 为底，熵用（bit） | 0 会得 `-inf` ⇒ 先 `x[x>0]` |
+| `x.std()` | 标准差 | **默认 `correction=1`（Bessel，除以 N−1）**；N=64 时比有偏版高 **0.79%**，N=4096 时只差 **0.012%**（本机实测） |
+
+**掩码（本关主角）**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `torch.ones(t,t,dtype=torch.bool).tril(diagonal=0)` | 下三角，True = 保留 | `diagonal` **默认就是 0**；`-1` → 第 0 行全 False → softmax 全 -inf → **NaN**；`+1` → 每行多留一个「未来」位（泄漏） |
+| `~mask` / `mask.logical_not()` | 布尔取反（实测两者逐元素相同） | **只对 bool/int 有效**；float 抛 `TypeError: ~ (operator.invert) is only implemented on integer and Boolean-type tensors`；int 上是**位运算**（`~[0,1,2] = [-1,-2,-3]`） |
+| `Tensor.masked_fill(mask, value)` | mask 为 **True** 处填 value | 语义是「填」不是「留」⇒ 传 `causal_mask` 时要**取反** |
+| `float("-inf")` | 加进分数 ⇒ `exp(-inf) = 0`，权重精确 0 | 别用 `-1e9` 凑数（换 dtype 会溢出/失真） |
+| `torch.finfo(dtype).min` | 有限最小值（fp16 **-65504**、fp32 **-3.40e38**） | 做 padding 掩码时替代 `-inf`，避免「整行屏蔽 ⇒ `softmax(全 -inf) = nan`」（本机实测确实是 `nan`） |
+
+**判据写法**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `(a-b).abs().max().item()` | 最大逐元素差 —— 判据的标准量 | 忘了 `.item()` 拿到的是 0 维张量 |
+| `(w != 0).sum(dim=-1)` | 每行非零个数 | 配 `torch.equal(nnz, arange(1,T+1))` 查结构 |
+| `torch.equal(a, b)` | 形状 + 元素**完全**相等 | `nan != nan` ⇒ 含 NaN 恒 False；形状不同直接 False |
+| `x.clone()` | 深拷贝 | **扰动前必须 clone**，否则 `x[[4,5]] += d` 改的是基准那一份 |
+| `x.tolist()` | → 嵌套 list | 打印/交给纯 Python 用 |
+
+**融合实现（生产写法，本关只做对照）**
+
+| API | 干什么 | 坑 |
+|---|---|---|
+| `F.scaled_dot_product_attention(q,k,v, is_causal=True)` | 一步算完的融合核 | 与 `attn_mask` **互斥**（同时给抛错） |
+| bool `attn_mask` | 掩码 | **`True` = 参与注意力**，与 `MultiheadAttention` 的 `key_padding_mask` **相反** |
+| `scale=` | 缩放因子 | 默认 `None` ⇒ `1/√E`，E = `query.size(-1)` |
+
+### 16.2 四处反直觉（考的就是这四条）
+
+1. **`True` 表示「参与」**，不是「屏蔽」—— 从 MHA 迁过来必须取反。
+2. **`shape[-1]` 是内容，前面的数才是数量** —— 缩放用小 `-1`（d），掩码边长用 `-2` 或 `0`（T）。
+3. **`std()` 默认无偏** —— 1/64 这种量级的比较会被 0.79% 的偏置吃掉一半阈值。
+4. **`masked_fill` 填的是 True 处** —— 所以 `masked_fill(~mask, -inf)` 才对。
+
+### 16.3 本关实测数字（2026-11-23）
+
+| 项 | 实测 |
+|---|---|
+| 判据 ① D 行和偏差 | **2.220e-16** |
+| 判据 ① A（改 5、6 → 前 4 个位置） | **0.000e+00**（严格 0） |
+| 判据 ① B（只改 6 → 第 5 个位置） | **0.000e+00**（严格 0） |
+| 判据 ① C（不掩码对照组） | **2.632e-02**（> 0，证明扰动真会传到过去） |
+| 自写 vs 官方 `is_causal=True` | 输出差 **2.220e-16**（float64 eps 量级） |
+
+### 16.4 官方依据（2026-11-23 查证）
+
+- `docs.pytorch.org` 2.15 · `scaled_dot_product_attention`：`is_causal` 为真 = 下三角（等价实现 `ones(L,S,bool).tril(diagonal=0)` → `masked_fill_(~temp_mask, float("-inf"))`，**-inf 在 softmax 之前**）；bool 掩码 `True` = 参与；`attn_mask` 与 `is_causal` 同时给**抛错**；`scale=None ⇒ 1/√E`。
+- `docs.pytorch.org` 2.15 · `torch.tril`：`diagonal` 默认 **0**；正值多包含上方对角线，负值排除下方对角线；**非原地**，返回新张量。
+- `docs.pytorch.org` 2.15 · `torch.std`：默认 `correction=1`（Bessel）；**2.0 起** `unbiased` 改名 `correction`，且 `correction` 只能关键字传参。
+- 本机实测（torch 2.11.0+cu128）：高维 `.T` 触发 deprecation 告警；`~float_tensor` 抛 `TypeError`；`softmax(全 -inf) = nan`；`exp(-inf) = 0.0`。
+
+### 16.5 自测卡（遮住上面口述，答不出回扫）
+
+1. `q` 形状 `(8,4)` 时，`q.shape[-1]` 和 `q.shape[-2]` 各是什么？缩放该用哪个，为什么？
+2. 为什么要 `masked_fill(~mask, -inf)`，少一个 `~` 会怎样？
+3. `tril(diagonal=-1)` 之后第 0 行是什么？跑判据会红在哪一项，报什么值？
+4. `torch.equal` 遇到 `nan` 返回什么？这会不会让判据假绿？
+5. `torch.randn` 不传 `generator` 与传了固定 seed，跑两次的区别是什么？
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
