@@ -10,7 +10,7 @@
 |---|---|---|
 | **0** | 环境（cu128 轮子 / capability / 冒烟） | ✅ 绿（判据 2/2） |
 | 1 | 单头算术（手算 vs torch、缩放要有数字） | ✅ 绿（判据 2/2 · 2026-11-22） |
-| 2 | 掩码与位置（因果掩码、置换等变 vs 位置编码） | ⬜ |
+| 2 | 掩码与位置（因果掩码、置换等变 vs 位置编码） | ✅ 绿（判据 2/2 · 2026-11-23） |
 | 3 | 最小 block（形状 / 参数量 / LayerNorm / gradcheck） | ⬜ |
 | 4 | 真训练（tinyshakespeare 2000 步、显存 < 6 GiB、val CE < bigram） | ⬜ |
 
@@ -34,6 +34,8 @@ cd practice/ai/l2-nanogpt
 uv sync                      # 首次拉 cu128 轮子，约 2–3 GB
 uv run python env_probe.py   # 关卡 0：判据 2/2 绿
 uv run python attention.py   # 关卡 1：判据 2/2 绿（①手算对账 ②缩放与熵）
+uv run python masking.py     # 关卡 2 判据 ①（A/B/C/D 四项）
+uv run python positions.py   # 关卡 2 判据 ②＋关卡入口：判据 2/2 绿
 uv run ruff check .
 ```
 
@@ -64,6 +66,33 @@ uv run ruff check .
 
 **为什么必须多 seed**：单 seed 的 std 比值实测在 **14.8 ~ 18.4** 之间乱摆（理论 16），`(64,64)` 里同一行的格子共享同一个 `q` 行向量、**不是独立样本**。10 seed 平均后落进 5%；30 seed 平均 15.98。
 
+## 实测数字（关卡 2 · 2026-11-23）
+
+文件：`masking.py`（判据 ①：`causal_mask` / `masked_scores` / `causal_weights` / `causal_attention`）＋ `positions.py`（判据 ②：`sinusoidal_pe` / `rope`，关卡入口也在这个文件）。
+
+| 判据 | 实测 |
+|---|---|
+| ① D 行非零个数 | `[1,2,3,4,5,6,7,8]` == 期望 `i+1` |
+| ① D 行和偏差 | **2.220e-16** |
+| ① A 改第 5、6 个 token → 前 4 个位置 | Δ **0.000e+00**（严格 0） |
+| ① B 只改第 6 个 → 第 5 个位置 | Δ **0.000e+00**（严格 0） |
+| ① C 不掩码对照组（同一扰动） | Δ **2.632e-02**（> 0，证明扰动真会传到过去） |
+| ② A 无位置编码的置换差 | **4.441e-16**（< 1e-12，等变） |
+| ② B 加正余弦后的置换差 | **2.298**（> 1e-3） |
+| ② C 加 RoPE 后的置换差 | **1.037**（> 1e-3） |
+| ② 自检 RoPE 范数变化 | **2.220e-16**（旋转正交，保长度） |
+| 独立复核：自写 vs 官方 `F.scaled_dot_product_attention(is_causal=True)` | 输出差 **2.220e-16** |
+| 独立复核：`rope` vs 显式旋转矩阵 `R_m x_m` | 差 **0.0**；`R^T R − I` 偏差 **1.11e-16** |
+| 独立复核：`sinusoidal_pe` vs 纯 Python `math` 公式 | 差 **0.0** |
+
+### 判据 ① 的口径（改必须写理由）
+
+阶段表原文第三子句写作「只改第 6 个 → 第 5 个 Δ > 0」，但掩码正确时它**必须**是 0，否则与前半句自相矛盾。⇒ 落地为**两路取证**：「掩码版 = 0」+「同一扰动在不掩码版的 Δ > 0」。缺后一条时，`Δ = 0` 可能是扰动没生效 / 权重恒等 / 算错成 0，判据会空转。
+
+### 判据 ② 的口径（改必须写理由）
+
+必须用**不掩码**的 attention（关卡 1 的 `attention`）。因果掩码本身依赖位置（第 i 行只看前 i+1 个），重排后掩码语义已变 ⇒ 拿掩码版测「置换等变」，差必然很大，但那是掩码造成的，与位置编码无关。
+
 ## 文档依据（2026-11-19 查证）
 
 | 来源 | 确认了什么 |
@@ -85,3 +114,8 @@ uv run ruff check .
 | **单 seed 的统计量会被采样噪声主导** | `std` 比值同一份代码在 **14.8~18.4** 间跳（理论 16）—— `(64,64)` 同行共享同一 `q` 行，有效样本远小于 4096。⇒ 统计类判据一律**多 seed 取平均**再定阈值，先测噪声再定口径 |
 | **`w.numel()` 不是行数** | 熵要按「行」平均（`w.shape[0]`）；误除 `numel()`（4096）会把 6 bit 缩成 0.094，跨 token 数不可比 |
 | **hardlink 降级警告** | 缓存与 venv 不在同一分区 ⇒ `Failed to hardlink files; falling back to full copy`（只影响安装耗时，不影响正确性；要消掉设 `UV_LINK_MODE=copy`） |
+| **掩码的 `True` 是「参与」，`masked_fill` 填的却是 True 处** | SDPA 的 `attn_mask`：**True = 参与注意力**；`MultiheadAttention` 的 `key_padding_mask`：**True = 屏蔽**（官方 Note 明说相反）。`masked_fill(mask, v)` 是「mask 为 True 处填 v」⇒ 传「允许」语义的掩码必须 `~mask`。⚠️ `~` 只对 bool/int 有效：float 抛 `TypeError: ~ (operator.invert) is only implemented on integer and Boolean-type tensors`；int 上是**位运算**（`~[0,1,2] = [-1,-2,-3]`） |
+| **`tril(diagonal=-1)` 会把第 0 行整行屏蔽成 `nan`** | `diagonal` 默认 0（自己看得见自己）；`-1` ⇒ 第 0 行全 False ⇒ `softmax(全 -inf) = nan`（实测），反向传播会污染整个 batch；`+1` ⇒ 每行多留一个未来位（泄漏） |
+| **高维 `.T` 已 deprecated** | torch 2.11 实测告警：`The use of x.T on tensors of dimension other than 2 to reverse their shape is deprecated` ⇒ 2D 用 `.T`，高维用 `.mT` 或 `x.transpose(-2,-1)`。另：1 维 `.T` 是**空操作**（`(4,)` → `(4,)`），变竖排要 `unsqueeze(1)` |
+| **`arange` 的 dtype 是推断的，不是你要的** | `arange(0,4,2)` 是 `int64`，除以 `d` 后落 **float32** ⇒ `10000 ** (-arange(0,4,2)/d)` 得 `0.009999999776482582`（与 float64 的 0.01 相对差 **2.2e-08**）。要 1e-12 量级的判据必须显式 `dtype=torch.float64` |
+| **`std()` 默认无偏，`LayerNorm` 内部却相反** | `torch.std` 官方 2.15：`correction` 默认 **1**（Bessel，2.0 起由 `unbiased` 改名）；N=64 时比 `correction=0` 高 **0.79%**、N=4096 只差 **0.012%**。而 `nn.LayerNorm` 用的是**有偏**方差（等价 `correction=0`）⇒ 两处口径相反，别混用 |
