@@ -4,15 +4,16 @@
 > **判据的唯一家 = 根目录 `README.md` 阶段表 L2 行**；本文件只记**状态**与**实测数字**，不抄判据全文。
 > 与 L1 的 `l1-bigram`（0 依赖、纯标准库）不同：这里**有 GPU 依赖**（torch cu128 轮子，约 2–3 GB）。
 
-## 五关与状态
+## 六关与状态
 
 | # | 关卡 | 状态 |
 |---|---|---|
 | **0** | 环境（cu128 轮子 / capability / 冒烟） | ✅ 绿（判据 2/2） |
 | 1 | 单头算术（手算 vs torch、缩放要有数字） | ✅ 绿（判据 2/2 · 2026-11-22） |
 | 2 | 掩码与位置（因果掩码、置换等变 vs 位置编码） | ✅ 绿（判据 2/2 · 2026-11-23） |
-| 3 | 最小 block（形状 / 参数量 / LayerNorm / gradcheck） | ⬜ |
+| 3 | 最小 block（形状 / 参数量 / LayerNorm / gradcheck） | ✅ 绿（判据 2/2 · 变异 4/4 · 2026-11-24） |
 | 4 | 真训练（tinyshakespeare 2000 步、显存 < 6 GiB、val CE < bigram） | ⬜ |
+| 5 | Tokenization（手写 BPE ≥200 merge、encode/decode 往返、与 API token 数对账） | ⬜ |
 
 ## 实测数字（关卡 0 · 2026-11-19）
 
@@ -36,6 +37,7 @@ uv run python env_probe.py   # 关卡 0：判据 2/2 绿
 uv run python attention.py   # 关卡 1：判据 2/2 绿（①手算对账 ②缩放与熵）
 uv run python masking.py     # 关卡 2 判据 ①（A/B/C/D 四项）
 uv run python positions.py   # 关卡 2 判据 ②＋关卡入口：判据 2/2 绿
+uv run python block.py       # 关卡 3 入口：判据 2/2 绿（① A–E · ② A–C）
 uv run ruff check .
 ```
 
@@ -93,6 +95,35 @@ uv run ruff check .
 
 必须用**不掩码**的 attention（关卡 1 的 `attention`）。因果掩码本身依赖位置（第 i 行只看前 i+1 个），重排后掩码语义已变 ⇒ 拿掩码版测「置换等变」，差必然很大，但那是掩码造成的，与位置编码无关。
 
+## 实测数字（关卡 3 · 2026-11-24）
+
+文件：`block.py`（`layer_norm` / `gelu` / `MiniBlock.__init__` / `MiniBlock.forward` 本人写；判据 `judge_block_shape` / `judge_backward` 由 AI 写；`cross_entropy` 无可复用代码 —— L1 的 `ce_bigram` 吃「字典 + 字符串」、单位 `log2`、不参与反传 —— 由 AI 代写后核对数值）。
+
+| 判据 | 实测 |
+|---|---|
+| ① A 形状 | `(2,8,4)` → `(2,8,4)`，输出全有限 |
+| ① B 参数量 | torch **244** == 手算 **244**（ln 8 + qkv 60 + proj 20 + ln 8 + ff 148） |
+| ① C 有界 | 输入 absmax **3145.30** → LN 后 **1.7083**（上界 √3 = 1.7321）；未放大同值 1.7083 |
+| ① D 口径（补） | 与 `nn.LayerNorm` 差：随机 **4.441e-16** / 小方差 **8.826e-15** |
+| ① E 残差（补） | `\|out\|/\|in\|` = **1.0004** |
+| ② A gradcheck | **True**（60 个入参 = 54 个参数元素 + 6 个输入，float64，约 0.95 s） |
+| ② B CE 梯度 | 与 `(softmax − onehot)/N` 差 **2.776e-17**；每行梯度和 **3.166e-17** |
+| ② C 手写 CE | 2.411830664494 vs 官方 2.411830664494，差 **4.441e-16** |
+
+### 变异种子（4/4 全红）
+
+| 变异 | 改坏什么 | 抓它的项 | 实测 |
+|---|---|---|---|
+| M1 | `correction=0` → `1`（无偏方差） | **① D** | 与官方差 随机 **2.289e-01** / 小方差 **8.059e-03** |
+| M2 | `sqrt(var + EPS)` → `sqrt(var) + EPS` | **① D** | 小方差 **8.825e-01**（随机输入只差 7.58e-05，靠 `var≈1e-6` 才放大） |
+| M3 | 去掉第一段残差（`x1 = out`） | **① E** | `\|out\|/\|in\|` = **0.0006**（正常 1.0004） |
+| M4 | `cross_entropy` 的 `.mean()` → `.sum()` | **② C** | 手写 **14.47** vs 官方 **2.41** |
+
+⚠️ **M1 / M2 / M3 在第一版判据下全部绿（漏网）**，因此补了两项，改判据必写理由：
+
+- **D 口径对账**：`layer_norm` 与官方 `nn.LayerNorm` 逐元素差 < 1e-12，喂两组输入（随机 + `var≈1e-6`）。随机输入单独不够 —— M2 在随机数据上只差 **7.58e-05**，必须用小方差把 eps 位置的影响放大。
+- **E 残差保真**：`|block(x)|max / |x|max ∈ [0.5, 2]`。这条 **gradcheck 也抓不到** —— 去掉残差后函数依然处处可微，只是塌成 0.001 量级。
+
 ## 文档依据（2026-11-19 查证）
 
 | 来源 | 确认了什么 |
@@ -119,3 +150,10 @@ uv run ruff check .
 | **高维 `.T` 已 deprecated** | torch 2.11 实测告警：`The use of x.T on tensors of dimension other than 2 to reverse their shape is deprecated` ⇒ 2D 用 `.T`，高维用 `.mT` 或 `x.transpose(-2,-1)`。另：1 维 `.T` 是**空操作**（`(4,)` → `(4,)`），变竖排要 `unsqueeze(1)` |
 | **`arange` 的 dtype 是推断的，不是你要的** | `arange(0,4,2)` 是 `int64`，除以 `d` 后落 **float32** ⇒ `10000 ** (-arange(0,4,2)/d)` 得 `0.009999999776482582`（与 float64 的 0.01 相对差 **2.2e-08**）。要 1e-12 量级的判据必须显式 `dtype=torch.float64` |
 | **`std()` 默认无偏，`LayerNorm` 内部却相反** | `torch.std` 官方 2.15：`correction` 默认 **1**（Bessel，2.0 起由 `unbiased` 改名）；N=64 时比 `correction=0` 高 **0.79%**、N=4096 只差 **0.012%**。而 `nn.LayerNorm` 用的是**有偏**方差（等价 `correction=0`）⇒ 两处口径相反，别混用 |
+| **3D 张量喂给只吃 2D 的注意力函数** | `causal_attention(q,k,v)` 收到 `(B,T,C)` ⇒ `k.T` 反转**所有**维变 `(4,8,2)`，`q(2,8,4) @ (4,8,2)` 报 `size of tensor a (2) must match the size of tensor b (4) at non-singleton dimension 0`。更阴的是 `causal_mask(q.shape[0])` 会拿 **B** 当序列长度（掩码 `(2,2)` 而非 `(8,8)`）⇒ **静默算错**。修法 = 逐 batch 调 2D 版再 `torch.stack(dim=0)` |
+| **`nn.Linear` 的 weight 是 `(out, in)`** | 手写矩阵乘必须 `.T`：写成 `z @ w1`（`(1,4,4)` 对 `(16,4)`）报 `mat1 and mat2 shapes cannot be multiplied (4x4 and 16x4)`。2D 的 `.T` 合法，高维要用 `.mT` |
+| **编辑器红线抓不到形状错** | Pylance 只验类型：`(2,8,4)` 与 `(8,4)` 同为 `torch.Tensor` ⇒ 一行都不标红，运行时才炸。补法 = docstring 写形状 + 入口 `assert x.ndim == 3` + 最小输入冒烟（`(1,2,4)`） |
+| **判据脚本里打 `−`（U+2212）也崩** | 与 `✓/✗`、`1024³` 同一族：`UnicodeEncodeError: 'gbk' codec can't encode character '\u2212'`。`print` 里一律用 ASCII 减号 |
+| **单头注意力里 `bk` 无效、`bv` 冗余、`bq` 有效** | softmax 平移不变 ⇒ `bk` 只给每行加同一常数，权重差 **5.55e-17**（完全无效）；`bv` 因权重行和为 1 退化成常数 `bv@wo`，与 `bo=bv@wo` 的输出差 **4.44e-16**（可被 `bo` 顶替）；只有 `bq` 有效（权重差 **0.077**，等于给每个 key 一个固定加分） |
+| **`nn.Parameter` 不包裹 = 静默丢参数** | `self.w = torch.zeros(2)` 不会进 `parameters()`（**不报错**，优化器永远不更新它）；而漏调 `super().__init__()` 报 `AttributeError: cannot assign parameters before Module.__init__() call` |
+| **`gather` 的三个硬约束** | `index.ndim` 必须等于 `input.ndim`（否则 `Index tensor must have the same number of dimensions as input tensor`）、dtype 必须 int64、值必须在 `[0, size(dim))`。所以 `targets (N,)` 要先 `unsqueeze(-1)`、取完再 `squeeze(-1)` |
