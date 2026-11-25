@@ -12,7 +12,7 @@
 | 1 | 单头算术（手算 vs torch、缩放要有数字） | ✅ 绿（判据 2/2 · 2026-11-22） |
 | 2 | 掩码与位置（因果掩码、置换等变 vs 位置编码） | ✅ 绿（判据 2/2 · 2026-11-23） |
 | 3 | 最小 block（形状 / 参数量 / LayerNorm / gradcheck） | ✅ 绿（判据 2/2 · 变异 4/4 · 2026-11-24） |
-| 4 | 真训练（tinyshakespeare 2000 步、显存 < 6 GiB、val CE < bigram） | ⬜ |
+| 4 | 真训练（tinyshakespeare 2000 步、显存 < 6 GiB、val CE < bigram） | ✅ 绿（判据 2/2 · 2026-11-25） |
 | 5 | Tokenization（手写 BPE ≥200 merge、encode/decode 往返、与 API token 数对账） | ⬜ |
 
 ## 实测数字（关卡 0 · 2026-11-19）
@@ -38,6 +38,11 @@ uv run python attention.py   # 关卡 1：判据 2/2 绿（①手算对账 ②�
 uv run python masking.py     # 关卡 2 判据 ①（A/B/C/D 四项）
 uv run python positions.py   # 关卡 2 判据 ②＋关卡入口：判据 2/2 绿
 uv run python block.py       # 关卡 3 入口：判据 2/2 绿（① A–E · ② A–C）
+uv run python corpus.py      # 关卡 4 块 1：语料/词表/切分/采样，判据 A–G
+uv run python baseline.py    # 关卡 4 块 2：bigram 基线，判据 A–F（取出 2.4819）
+uv run python model.py       # 关卡 4 块 3a：模型形状/参数/CE/因果，判据 A–E
+uv run python train.py       # 关卡 4 块 3b：2000 步训练，判据 A–C（约 46 s，存 ckpt.pt）
+uv run python sample.py      # 关卡 4 块 3c：生成 200 字 + 重复片段，判据 A–C
 uv run ruff check .
 ```
 
@@ -124,6 +129,78 @@ uv run ruff check .
 - **D 口径对账**：`layer_norm` 与官方 `nn.LayerNorm` 逐元素差 < 1e-12，喂两组输入（随机 + `var≈1e-6`）。随机输入单独不够 —— M2 在随机数据上只差 **7.58e-05**，必须用小方差把 eps 位置的影响放大。
 - **E 残差保真**：`|block(x)|max / |x|max ∈ [0.5, 2]`。这条 **gradcheck 也抓不到** —— 去掉残差后函数依然处处可微，只是塌成 0.001 量级。
 
+## 实测数字（关卡 4 · 2026-11-25）
+
+三块五文件：`corpus.py`（数据）· `baseline.py`（基线）· `model.py`（模型）· `train.py`（训练）· `sample.py`（生成）。
+代码归属：**D2–D6 / B1–B3 / M1–M4 本人写**；训练主循环 `train_model` 与 `sample.py` 由 AI 代写（本人明确要求，以逐行讲解补，判据未降级）。
+
+### 块 1 数据（判据 A–G，1/1 绿）
+
+| 判据 | 实测 |
+|---|---|
+| A 语料 | **1,115,394** 字符（bytes == chars，纯 ASCII） |
+| B 词表 | **65** · 互逆 True · 有序 True（`itos[0] == '\n'`） |
+| C 往返 | 10 段逐字相等（含 `text[::997]` 非连续抽样） |
+| D 切分 | train **1,003,854** + val **111,540** = 1,115,394 · val 起点对齐 |
+| E batch | `(4,16)` int64 · 值域 [0,65) · `y` 是 `x` 右移一位 |
+| F 采样覆盖 | `arange(2000)` 探针：起点 **[0, 1869]**（上界 1871）· 窗口连续 · 跨窗口右移 |
+| G 可复现 | 同 seed 相同 · 换 seed 不同 |
+
+### 块 2 bigram 基线（判据 A–F，1/1 绿）
+
+| 判据 | 实测 |
+|---|---|
+| A 计数 | `sum(C_bi)` **1,003,853** == len−1 · `sum(C_uni)` **1,003,854** == len · 行和对账 True |
+| B 行归一 | 最大偏差 **3.331e-16**（float64；float32 是 1.19e-07，撞不过 1e-12） |
+| C 对账官方 | 自写 CE 2.463054321128 vs `F.cross_entropy` 2.463054321128，差 **0.000e+00** |
+| D 平滑必要性 | val 未见对 **187 / 111,539 = 0.168%**；MLE（k=0）CE = **inf** |
+| E 三档 k（val CE） | k=1 **2.4819** · k=0.1 2.4838 · k=0.01 2.4875 → 最优 **k=1**；unigram 3.3473 |
+| F train/val | train **2.4546** < val **2.4819**（差 0.0273）｜bits/char 3.5412 / **3.5806** |
+
+**判据 ② 的基线 = 2.4819 nats/char（k=1）**。扩档验证（不入判据）：k=2 2.4829 · k=5 2.4877 · k=10 2.4968 · k=30 2.5323 ⇒ 最优点就在 k≈1，网格够用。
+
+### 块 3a 模型（判据 A–E，1/1 绿）
+
+| 判据 | 实测 |
+|---|---|
+| A 形状 | logits `(2,16,65)` · loss 0 维有限 |
+| B 参数量 | torch **826,368** == 手算 826,368（每层 198,272 × 4 + 8,320 + 16,384 + 256 + 8,320） |
+| C CE 对账 | 模型 4.312124252 vs 手动 4.312124252，差 **0.000e+00** |
+| D 因果（两路） | 改末位后 过去 **0.000e+00**（严格 0）· 末位 **1.750e+00**（> 0） |
+| E 位置表 | `pos_emb (128, 128)` · 满长 128 前向通过 |
+
+结构：C=128 · 4 层 · FFN 4× · **单头** · 注意力用官方 `F.scaled_dot_product_attention(is_causal=True)`（与关 2 自写版差 2.220e-16，等价性已在关 2 取证）。
+
+### 块 3b 训练（判据 A–C，1/1 绿）
+
+| 判据 | 实测 |
+|---|---|
+| ① 显存 | 峰值 **0.322 GiB**（上限 6.0）· 未 OOM |
+| ① 步数 | **2000**（固定，16,384,000 token ≈ 19.8 token/参数） |
+| ② val CE | **1.7983 < 2.4819**（低 0.6836，即 **−27.5%**） |
+
+曲线（nats/char）：0 步 **4.3175** → 100 步 2.5367 → 200 步 2.4549（**约 150 步穿过基线**）→ 1000 步 2.0456 → 1900 步 **1.7974** → 2000 步 1.7983（末段 val 微升 = 过拟合开始）。train 末值 **1.5957**，gap 0.20。耗时 **45.7 s**（**22.9 ms/步**）。bits/char：6.23 → **2.594**。
+
+### 块 3c 生成（判据 A–C，1/1 绿）
+
+| 判据 | 实测 |
+|---|---|
+| A 形状 | 200 字符 · 全在词表 |
+| **B 塌缩** | 最长重复子串 **5 字符**（上限 20）· 位置 130 · 内容 `' the '` |
+| C 可复现 | 同 seed 相同 · 换 seed 不同 |
+
+样本（seed 1337）：`\n\nCOMINIUS:\nMy will, is and the a see bober of and rud my call'd\nMy arm that us art to bar dings aners.\n\nHENRY BOTHAK:\n...` —— 学到了「人名行 + 空行 + 标点」的排版结构，词汇是坏的（1.8 nats 水平该有的样子）。
+
+### 口径（改必须写理由）
+
+| 项 | 口径 |
+|---|---|
+| CE 单位 | **一律 nats/char**；bits 仅作展示（÷ln2）。不跨语料比较 |
+| 基线取哪档 | add-k 三档取**最优**（k=1）；故意取坏档 = 把判据做绿 |
+| 「最长重复片段」 | **最长重复子串（至少出现两次、允许重叠）**，`O(n²)` DP；`"aaaa"` 的最长重复是 `"aaa"` |
+| 解码参数 | **temperature 0.8 + top_k 40**，先定后用，不按结果回调 |
+| 显存口径 | `max_memory_allocated`（tensor 实际占用），训练前 `reset_peak_memory_stats` |
+
 ## 文档依据（2026-11-19 查证）
 
 | 来源 | 确认了什么 |
@@ -157,3 +234,9 @@ uv run ruff check .
 | **单头注意力里 `bk` 无效、`bv` 冗余、`bq` 有效** | softmax 平移不变 ⇒ `bk` 只给每行加同一常数，权重差 **5.55e-17**（完全无效）；`bv` 因权重行和为 1 退化成常数 `bv@wo`，与 `bo=bv@wo` 的输出差 **4.44e-16**（可被 `bo` 顶替）；只有 `bq` 有效（权重差 **0.077**，等于给每个 key 一个固定加分） |
 | **`nn.Parameter` 不包裹 = 静默丢参数** | `self.w = torch.zeros(2)` 不会进 `parameters()`（**不报错**，优化器永远不更新它）；而漏调 `super().__init__()` 报 `AttributeError: cannot assign parameters before Module.__init__() call` |
 | **`gather` 的三个硬约束** | `index.ndim` 必须等于 `input.ndim`（否则 `Index tensor must have the same number of dimensions as input tensor`）、dtype 必须 int64、值必须在 `[0, size(dim))`。所以 `targets (N,)` 要先 `unsqueeze(-1)`、取完再 `squeeze(-1)` |
+| **`super().__init__()` 写在类末尾 = 赋值子模块时崩** | `self.ln1 = nn.LayerNorm(c)` 走 `nn.Module.__setattr__`，它要先查 `self._modules`（在 `super().__init__()` 里创建）⇒ 报 `AttributeError: cannot assign module before Module.__init__() call`。变体更阴：`self.blocks = [blk1, blk2]`（普通 list）被当普通属性塞进 `__dict__`，**不报错、不进 `parameters()`**、优化器永不更新（关卡 4 实测：用 `ModuleList` 才是 826,368，用 list 会少 793,088） |
+| **`__init__` 的参数在 `forward` 里不存在** | `vocab_size` 是 `__init__` 的局部变量，`forward` 看不到 ⇒ `NameError: name 'vocab_size' is not defined`。改法：`logits.shape[-1]`（最稳）或 `self.head.out_features`。**这条 ruff 能提前抓**（`F821 Undefined name`）⇒ 写完方法体先 `ruff check .`，别等跑判据读 traceback |
+| **`model.to(dev)` 不搬数据** | 参数上了 GPU、`get_batch` 的 `x/y` 还在 CPU ⇒ `RuntimeError: Expected all tensors to be on the same device, but got index is on cpu ... cuda:0`。每步 `x.to(dev), y.to(dev)`（2×64 KB）即可；把整份数据搬上去仍需 CPU 的 offset，省不掉 |
+| **`torch.Generator` 绑定设备** | probs 在 cuda 上却传 CPU generator ⇒ `RuntimeError: Expected a 'cuda' device type for generator but found 'cpu'`。生成函数收 `seed: int`，内部 `torch.Generator(device=dev)` 再 `manual_seed` |
+| **`randint` 的上界 ≠ 合法 offset 上界** | 合法 offset 最大 = `len - block - 1`；`randint(high)` 取不到 high ⇒ high 至少要 `len - block`。本目录用 `len-block-1` 是**保守一位**（无害）。**真正会炸的是 high 偏大**：`len-block+1` 起 y 右端钳到末尾、静默变短 → `stack expects each tensor to be equal size`（实测 len=10/block=3：o=6 合法、o=7 起短一位） |
+| **控制台把 UTF-8 当 GBK 解码 = 一堆 `�`** | 跑出来 `A ���� 200 �ַ�` 不是代码错，是终端代码页问题。判别：看 `OK` / `判据 1/1 绿` 是否正常。解决：`$env:PYTHONIOENCODING='utf-8'`（本会话）或 `chcp 65001`。与 `1024³` / `✓` / `−` 同族：**控制台编码 ≠ 文件编码** |

@@ -15,12 +15,16 @@ venv/
 *.key
 secrets.*
 
-# ===== 运行产物（trace / 日志 / 缓存）=====
+# ===== 运行产物（trace / 日志 / 缓存 / 权重）=====
 *.log
 runs/
 .cache/
+*.pt
+*.pth
 
 # ===== 数据 / 本地存储（评测集 / 向量库 / 本地库）=====
+# 语料（别人的、能重下 ⇒ 不入库；由脚本自动下载缓存）
+practice/ai/l2-nanogpt/data/
 *.parquet
 *.sqlite
 *.db
