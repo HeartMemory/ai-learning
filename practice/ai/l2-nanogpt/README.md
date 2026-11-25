@@ -13,7 +13,7 @@
 | 2 | 掩码与位置（因果掩码、置换等变 vs 位置编码） | ✅ 绿（判据 2/2 · 2026-11-23） |
 | 3 | 最小 block（形状 / 参数量 / LayerNorm / gradcheck） | ✅ 绿（判据 2/2 · 变异 4/4 · 2026-11-24） |
 | 4 | 真训练（tinyshakespeare 2000 步、显存 < 6 GiB、val CE < bigram） | ✅ 绿（判据 2/2 · 2026-11-25） |
-| 5 | Tokenization（手写 BPE ≥200 merge、encode/decode 往返、与 API token 数对账） | ⬜ |
+| 5 | Tokenization（手写 BPE ≥200 merge、encode/decode 往返、与 API token 数对账） | ✅ 绿（判据 3/3 · 2026-11-25 · 对账达标档 **1000 merge**, 相对差 10.81%） |
 
 ## 实测数字（关卡 0 · 2026-11-19）
 
@@ -43,6 +43,8 @@ uv run python baseline.py    # 关卡 4 块 2：bigram 基线，判据 A–F（�
 uv run python model.py       # 关卡 4 块 3a：模型形状/参数/CE/因果，判据 A–E
 uv run python train.py       # 关卡 4 块 3b：2000 步训练，判据 A–C（约 46 s，存 ckpt.pt）
 uv run python sample.py      # 关卡 4 块 3c：生成 200 字 + 重复片段，判据 A–C
+uv run python tokenizer.py   # 关卡 5：BPE 判据 C（底层）B（官方值）A（十句往返），3/3 绿
+uv run python judge_api.py   # 关卡 5：判据 ② 与 API 对账（**会真实计费**，只手动跑）
 uv run ruff check .
 ```
 
@@ -201,6 +203,72 @@ uv run ruff check .
 | 解码参数 | **temperature 0.8 + top_k 40**，先定后用，不按结果回调 |
 | 显存口径 | `max_memory_allocated`（tensor 实际占用），训练前 `reset_peak_memory_stats` |
 
+## 实测数字（关卡 5 · 2026-11-25）
+
+两个文件：`tokenizer.py`（BPE 本体，**T1–T8 方法体本人写**；判据 A/B/C 与 `_show`/`_expand` 由 AI 写）+ `judge_api.py`（判据 ② 对账脚本，AI 写，**本人手动跑**）。
+口径与理由见 `tokenizer.py` 文件头 ①–⑧；下面是数字。
+
+### 判据 C 底层手算（块 1 · 3/3）
+
+| 项 | 实测 |
+|---|---|
+| C1 字节层 | 你好 **6 B** · 😉 **4 B** · 空串 **0 B** · 值域 `[0,255]` · 往返 True |
+| C2 相邻对 | `[1,1,2,1,2,2,1]` → `{(1,1):1,(1,2):2,(2,1):2,(2,2):1}` == 手算 · 累加语义（传入 `{(9,9):5}` 不被清空）· 空/单元素 → `{}` |
+| C3 merge | `[1,1,2,1,2]`+(1,2)→9 = `[1,9,9]` · **不重叠**（`[1,1,1]`→`[9,1]`）· **不就地改** · 元素守恒 |
+
+### 判据 B 官方参考值（块 2 · 1/1）
+
+| 项 | 实测 |
+|---|---|
+| 参考例 | `"aaabdaaabac"` + **3** merge ⇒ merges **3** 条 · 词表 **259** · 引用合法（`a,b < 256+k`） |
+| encode | **`[258, 100, 258, 97, 99]`** == minbpe README 官值（逐元素） |
+| decode | 往返 True（11 字符 → 5 token） |
+
+### 判据 A 十句往返（块 2 · 10/10）
+
+训练切片 **100,000** 字符（语料前 10 万，`TRAIN_CHARS`）· **200** merge · 词表 **456**。
+
+| # | 句子类型 | 字符 → token | 字符/token |
+|---|---|---|---|
+| 0 | 莎士比亚英文 | 42 → 18 | **2.33** |
+| 1 | 英文（含撇号） | 39 → 20 | 1.95 |
+| 2 | 全大写 + 数字 + 感叹 | 27 → 27 | 1.00 |
+| 3 | 空串 | 0 → 0 | — |
+| 4 | 前后空格 | 31 → 18 | 1.72 |
+| 5 | 中文 | 13 → 39 | **0.33** |
+| 6 | 中英混排 | 19 → 28 | 0.68 |
+| 7 | emoji | 10 → 17 | 0.59 |
+| 8 | 全角标点 | 17 → 51 | **0.33** |
+| 9 | 制表符 / 换行 | 12 → 32 | 0.38 |
+| — | **合计** | 210 → 250 | 0.84 |
+
+**10/10 逐字相等**。第 5 句的 0.33 = **3 token/汉字**，正是「语料里没有中文 ⇒ 退回 UTF-8 原始字节」的直接证据。
+
+### 判据 ② 与 API 对账（块 3 · 通过 · 1000 merge 档）
+
+对账文本 = 语料第 100,000 字符之后的 **2000** 字符（held-out，与训练切片不重叠）；差分消模板（base = 1 个字符 `"x"`）。
+
+| 项 | 实测 |
+|---|---|
+| API 侧 | base **31** · sample **623** ⇒ 内容 token **592**（≈ 3.38 字符/token） |
+| 200 merge（判据下界） | 我 **1013** token（1.97 字符/token）· 相对差 **71.11%** ❌ |
+| 500 merge | 我 **774**（2.58 字符/token）· 相对差 **30.74%** ❌（只差 0.74 个点） |
+| **1000 merge** | 我 **656**（3.05 字符/token）· 相对差 **10.81%** ✅ |
+| 结论 | 判据 ② 取**能进 30% 的最小档 = 1000 merge**（相对差 10.81%） |
+| 成本 | **2 次调用** · 输入 654 token · ≈ **¥0.002** |
+
+⚠️ 三条如实记：
+
+1. **200 merge 档是红的（71.11%）** —— 判据原文「≥ 200」是**下界**而不是等号；档位（200/500/1000）在跑之前就写死在 `judge_api.py` 的 `MERGE_SCAN` 里，不是事后挑出来的。
+2. **500 档 30.74%，只差 0.74 个点** —— 30% 门槛附近对档位极敏感；若允许「跑完再挑档位」，这条判据等于可以随便做绿 ⇒ 口径必须**先写档位再跑**。
+3. **中文不参与判 OK/NG** —— 本词表 0.33 字符/token vs 官方约 1.7 汉字/token，差 4 倍量级；根因是语料没覆盖，不是算法错。中文只作判据 ③ 的证据。
+
+### 判据 ③ 为什么 token 数 ≠ 字数（三句话 + 数字）
+
+1. **token 是字节/子词单位，不是字**：英文 **3.05 字符/token**（1000 merge 档）、中文 **0.33**、全角标点 **0.33**、空串 **0 个 token**。
+2. **差多少只取决于词表覆盖**：同一段 2000 字符英文，我的 **200 / 500 / 1000** merge 分别切 **1013 / 774 / 656** 个 token，服务商切 **592** —— 算法是同一套 byte-level BPE，差的只是「合并多少次 + 语料覆盖什么」。
+3. **所以不能按字数折算**：官方「1 英文字符 ≈ 0.3 token、1 中文字符 ≈ 0.6 token」只是平均值；本关实测中英文相差 **9 倍**（3.05 vs 0.33 字符/token）⇒ 混排文本按字数估算会差一个数量级。精确值只能看响应里的 `usage`。
+
 ## 文档依据（2026-11-19 查证）
 
 | 来源 | 确认了什么 |
@@ -209,6 +277,15 @@ uv run ruff check .
 | PyTorch 2.7 发布说明（pytorch.org） | 2.7 起支持 **Blackwell**，并提供 **CUDA 12.8 预编译轮子** |
 | Clore.ai 兼容表 + 社区复现记录（gist） | Blackwell / sm_120 需要 **CUDA 12.8+ 且 torch ≥ 2.7**；不匹配时症状 = `no kernel image is available for execution on the device` |
 | 本机实测 | `get_device_capability() == (12, 0)`；首次 vs 稳态耗时差 **≈600×** |
+
+### 关卡 5（2026-11-25 查证：手写 BPE / token 口径）
+
+| 来源 | 确认了什么 |
+|---|---|
+| `karpathy/minbpe` README（BPE 参考实现） | 起点固定 **256 个单字节 token**；`词表 = 256 + merge 次数`；训练 = 反复「统计相邻对 → 合并最高频」；**encode 按学到的 merge 顺序（rank）逐条应用**，不重新统计；byte-level ⇒ 任何文本可编码、`decode(encode(x)) == x`；解释 token ≠ 字的三个原因（一个 token 可覆盖多字符 / 汉字 UTF-8 占 **3 字节** / emoji **4 字节**） |
+| `openai/tiktoken` README | 同一套 byte-level BPE；`enc.decode(enc.encode(x)) == x`；平均约 **4 字节/token**；encode 实现 = **每轮取全局最小 rank 的那一对合并**（与「按 merges 顺序逐条应用」等价）；`mergeable_ranks` 是 `dict[bytes, int]`（⇒ 词表按字节串存，与本关口径 ② 一致） |
+| DeepSeek 官方《Token 用量计算》 | **1 个英文字符 ≈ 0.3 token、1 个中文字符 ≈ 0.6 token**；「不同模型分词不同」；精确值以 `usage` 为准（⇒ 判据 ② 必须用差分对账，不能按字数折算） |
+| ⚠️ 交叉核对发现的一处矛盾 | minbpe README 文字写「第 2 次合并 `(a,b)`」，其代码在平票时实际给 `(256,97)`；**两条路径的 encode 结果相同**（`[258,100,258,97,99]`）⇒ 判据只卡 encode 结果，不卡 merges 逐项；平票口径必须自己写死（`tokenizer.py` 口径 ③） |
 
 ## 踩过的坑
 
@@ -240,3 +317,7 @@ uv run ruff check .
 | **`torch.Generator` 绑定设备** | probs 在 cuda 上却传 CPU generator ⇒ `RuntimeError: Expected a 'cuda' device type for generator but found 'cpu'`。生成函数收 `seed: int`，内部 `torch.Generator(device=dev)` 再 `manual_seed` |
 | **`randint` 的上界 ≠ 合法 offset 上界** | 合法 offset 最大 = `len - block - 1`；`randint(high)` 取不到 high ⇒ high 至少要 `len - block`。本目录用 `len-block-1` 是**保守一位**（无害）。**真正会炸的是 high 偏大**：`len-block+1` 起 y 右端钳到末尾、静默变短 → `stack expects each tensor to be equal size`（实测 len=10/block=3：o=6 合法、o=7 起短一位） |
 | **控制台把 UTF-8 当 GBK 解码 = 一堆 `�`** | 跑出来 `A ���� 200 �ַ�` 不是代码错，是终端代码页问题。判别：看 `OK` / `判据 1/1 绿` 是否正常。解决：`$env:PYTHONIOENCODING='utf-8'`（本会话）或 `chcp 65001`。与 `1024³` / `✓` / `−` 同族：**控制台编码 ≠ 文件编码** |
+| **GBK 打不出 emoji，判据一打印数据原文就崩** | `UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f609'`；emoji（U+1F609）就是编不出来，与 `✓/✗`、`−`、`1024³` 同一族。⇒ 判据里凡要打印**数据原文**（含 emoji 的句子）都先过一层转义（`tokenizer.py::_show`，`backslashreplace`），标记本身仍只用 ASCII |
+| **`max(stats, key=stats.get)` 被 Pylance 判错，运行却正常** | `dict.get` 的类型是 `(k) -> V \| None`，而 `max` 的 `key` 要求返回值可比较 ⇒ `reportCallIssue` / `reportArgumentType`。运行不炸是因为 `max` 遍历的 key 必然命中。改法：`key=lambda p: stats[p]`（类型是 `V`）。⚠️ 别改成 `key=lambda kv: (kv[1], kv[0])` —— 元组比较在**平票时会退回按 pair 字典序**，等于偷偷改掉口径 ③（`aaabdaaabac` 的第 1 条 merge 就从 `(97,97)` 变 `(97,98)`） |
+| **默认参数 `None` 不兜底 = 第一个元素就崩** | `counts: dict \| None = None` 之后直接 `counts[pair] = ...` ⇒ `AttributeError: 'NoneType' object has no attribute 'get'`；Pylance 同时报 `reportOptionalMemberAccess` / `reportReturnType`。**类型注解就是提示**：写了 `\| None` 就必须在函数体第一行把它变成真对象 |
+| **判据的「下界」被当成等号 = 可以把判据做绿** | 判据 ② 实测 200 merge 差 **71.11%**、500 merge 差 **30.74%**（只差 0.74 个点）、1000 merge 差 **10.81%**。若允许「跑完再挑档位」，30% 这条几乎必然能过 ⇒ 档位必须在跑之前写死（`judge_api.py::MERGE_SCAN`） |

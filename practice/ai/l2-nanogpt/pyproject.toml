@@ -5,6 +5,8 @@ description = "L2 注意力：单头 attention → 最小 Transformer block（�
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.5.5",
+    "openai>=3.59.0",
+    "python-dotenv>=1.2.4",
     "torch>=2.9",
 ]
 
