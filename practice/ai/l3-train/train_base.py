@@ -160,10 +160,12 @@ def write_curve(res: RunResult) -> Path:
     return path
 
 
-def train_once(seed: int, lr: float = LR) -> RunResult:
+def train_once(seed: int, lr: float = LR, warmup: int = 0) -> RunResult:
     """T1 · 一次完整训练。**同 seed 必须给出逐位相同的结果**（判据 A / B 全靠这条）。
 
     `lr` 默认取模块常量 `LR`（= 3e-4，关 0 的口径）；关 1 扫 lr 时传别的值 —— 只改这一个量。
+    `warmup` 是线性升温的步数（关 2）：前 `warmup` 步把 lr 从 `lr/warmup` 线性升到 `lr`，
+    之后恒定；`0` = 不升温（关 0 / 关 1 的口径）。
 
     必须做到（顺序与字段名都别改，判据按 `RunResult` 的字段取数）：
       1. 随机性只从 seed 来（关 0 的唯一入口）：
@@ -230,6 +232,10 @@ def train_once(seed: int, lr: float = LR) -> RunResult:
         assert loss is not None
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+        if warmup > 0:
+            scale = min(1.0, (step + 1) / warmup)
+            for group in opt.param_groups:
+                group["lr"] = lr * scale
         opt.step()
         res.step_ce.append(float(loss.item()))
 
