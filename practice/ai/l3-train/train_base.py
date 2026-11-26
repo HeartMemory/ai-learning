@@ -160,8 +160,10 @@ def write_curve(res: RunResult) -> Path:
     return path
 
 
-def train_once(seed: int) -> RunResult:
+def train_once(seed: int, lr: float = LR) -> RunResult:
     """T1 · 一次完整训练。**同 seed 必须给出逐位相同的结果**（判据 A / B 全靠这条）。
+
+    `lr` 默认取模块常量 `LR`（= 3e-4，关 0 的口径）；关 1 扫 lr 时传别的值 —— 只改这一个量。
 
     必须做到（顺序与字段名都别改，判据按 `RunResult` 的字段取数）：
       1. 随机性只从 seed 来（关 0 的唯一入口）：
@@ -207,7 +209,7 @@ def train_once(seed: int) -> RunResult:
     if dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
-    opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     model.train()
 
     res = RunResult(seed=seed)
