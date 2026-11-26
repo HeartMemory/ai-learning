@@ -1590,6 +1590,80 @@ torch.backends.cudnn.deterministic = True
 2. **档位 / 锚点 / 窗口都在跑前写死** —— 跑完再挑档 = 判据可以随便做绿（L2 关 5 的 30% 门槛已经吃过一次）。
 3. **一个正确的结论也需要一次能证伪的实验** —— 稳值档上测 warmup 等于没测。
 
+## 第 21 章 · 思考模式：一个开关、两个通道、两套名字（2026-11-26 · L4 关卡 5）
+
+> 一句话：**开关和强度是两个参数、走两个通道；思考内容与思考 token 是两条通道；计费按输出算，但「开思考」还会额外吃输入。**
+> 实测模型 `deepseek-v4.1-flash`（百炼，OpenAI 兼容入口）。
+
+### 21.1 三条通道，别混
+
+| 通道 | 位置 | 用途 |
+|---|---|---|
+| 开关 / 强度 | 请求参数 | 控制想不想、想多深 |
+| 思考内容 | `message.reasoning_content`（流式在 `delta.reasoning_content`） | 给人看；**不拼回历史**（带 `tools` 时例外：必须回传，否则 400） |
+| 账 | `usage.completion_tokens_details.reasoning_tokens` | **含在 `completion_tokens` 里**，不单独计价 |
+
+`reasoning_tokens` 缺失时是 `None` 而不是 `0`（关思考时供应商整段不给 `completion_tokens_details`）⇒ 把 `None` 当 0 等于宣称「思考免费」。
+
+### 21.2 两套名字：调谁用谁的
+
+| 平台 | 开关 | 强度 |
+|---|---|---|
+| 阿里云百炼 | `enable_thinking`（bool，**非** OpenAI 标准参数 ⇒ 走 `extra_body`） | `reasoning_effort`（**标准参数**，顶层） |
+| DeepSeek 直连 | `{"thinking": {"type": "enabled"\|"disabled"}}`（走 `extra_body`） | `reasoning_effort`（顶层） |
+
+**判定该放哪一层，看签名不看记忆**：
+
+```python
+import inspect
+p = inspect.signature(client.chat.completions.create).parameters
+# 有名字 → 顶层可传；没有 → 只能塞 extra_body
+# 且 SDK 没有 **kwargs ⇒ 传错是参数绑定阶段的 TypeError，不是静默忽略
+```
+
+### 21.3 强度：有效三档，外加「不传」
+
+- OpenAI 格式的 `reasoning_effort` 有效值 **`low` / `high` / `max`**，默认 **`high`**；兼容值 `minimal` / `medium` / `xhigh` / `ultra` 会被收敛到这三档。
+- 「**不传**」和「传 `high`」当天效果相同、**契约不同**：不传 = 默认权在平台（升级可能静默变），显式 = 默认权在自己。数值上今天等价：`high` 95 思考 token vs 不指定 —— 所以真正要钉的是「我要不要显式」。
+- ⚠️ **文档冲突时按「模型专属行 > 系列通配行」**：参数页一行写 `deepseek-v4.1-flash` 可选 `max/high/low`，另一行写「DeepSeek-V4 系列 `low`/`medium` 映射为 `high`」。按专属行记 `low` 合法；实测 `low` 90 vs `high` 95（同一题各 1 次）**证不了档位差异**，只记方向。
+
+### 21.4 计费：思维链算输出，但开思考多吃输入
+
+官方原文：「思考模式下，**思维链按照输出 Token 计费**」；部分混合思考模型在思考/非思考模式**价格不同**，只要输出了思考过程，全部输出 token 都按思考模式价计。
+
+实测（同一题「9.9 和 9.11 哪个大」，各 1 次）：
+
+| 档位 | 输入 | 输出 | 其中思考 | 可见输出 | 费用(元) |
+|---|---|---|---|---|---|
+| `off` | **21** | 11 | **None** | 11 | **0.000130** |
+| `low` | 47 | 102 | 90 | 12 | 0.000910 |
+| `high` | 47 | 107 | 95 | 12 | 0.000950 |
+| `max` | 47 | 159 | 147 | 12 | **0.001366** |
+
+两条读法：
+
+1. **`completion = reasoning + 可见`** 三条全对（`107=95+12` / `102=90+12` / `159=147+12`）⇒ 思考是「看不见的输出」，不是输入。
+2. **开启思考本身多吃 26 个输入 token**（**21 → 47**）—— 隐藏模板。这个 26 与 2026-11-20 记的 `45 → 19` 完全一致，属独立复现 ⇒ 成本账要两头算。
+
+### 21.5 `temperature` 为什么在思考模式下不生效
+
+DeepSeek 原文：*"Thinking mode does not support the temperature, top_p, presence_penalty, or frequency_penalty parameters … setting these parameters will not trigger an error but will also have no effect."*
+
+⇒ 传了**不报错**，所以「我传了 temperature=0」不是证据；能证明的只有「同一请求两次文本仍然不同」或「关思考后同一请求两次相同」。平台侧参数范围：`temperature` **[0, 2)**、`top_p` **（0,1.0]**（百炼《OpenAI兼容-Chat》）。
+
+### 21.6 类型标注 ≠ 运行时校验
+
+两个常被误会的工具（都实测过）：
+
+| 工具 | 运行时行为 | 实测 |
+|---|---|---|
+| `Literal["a","b"]` | **不校验**，只是静态层的取值集合 | `_thinking_kwargs("bogus")` 原样返回 `reasoning_effort='bogus'` ⇒ 运行时守门人得靠 argparse 的 `choices` |
+| `cast(T, x)` | **恒等函数**（`return x`） | `cast(int, "abc")` 返回 `"abc"`（str） |
+
+`get_args(Literal[...])` 之所以能取到档位，是因为 `Literal[...]` 在运行时**是个带 `__args__` 的 typing 对象**（`_LiteralGenericAlias`），不是被擦除的注解；`get_args` 本质是「有 `__args__` 就返回它」。所以 `get_args(ThinkLevel | None)` 会多出一个 `NoneType` —— `choices` 只能喂 `ThinkLevel` 本身。
+
+---
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
