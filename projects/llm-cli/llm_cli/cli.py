@@ -3,17 +3,17 @@
 退出码约定：`0` 成功 ｜ `2` 配置缺失（`config.load_settings` 抛的）｜ `1` 其它异常（自己接）
            `3` 输出正文为空（模型拒绝回答 / 只返回空串 / 只返回 None）
 """
-
 import argparse
 import sys
 from pathlib import Path
+from typing import get_args
 
 from openai import OpenAI
 
 from .billing import bill, format_bill
 from .chat import run_chat
 from .config import PROJECT_ROOT, load_settings
-from .llm import ask, ask_stream
+from .llm import ThinkLevel, ask, ask_stream
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="走流式：报「首 token(ms)」与「耗时(ms)」，正文边到边打印",
     )
+    parser.add_argument(
+        "--think",
+        choices=list(get_args(ThinkLevel)),
+        default=None,
+        help="思考强度：off=关思考；low/high/max=开思考并指定强度；不传=厂商默认（本模型默认开、effort=high）",
+    )
+
     return parser
 
 
@@ -79,10 +86,16 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv_list)
     settings = load_settings()
+    print(f"思考: {args.think or '(未指定 = 厂商默认)'}")
     client = OpenAI(api_key=settings.api_key, base_url=settings.base_url)
 
     if args.stream:
-        answer = ask_stream(prompt=args.prompt, model=args.model or settings.model, client=client)
+        answer = ask_stream(
+            prompt=args.prompt,
+            model=args.model or settings.model,
+            client=client,
+            think=args.think,
+        )
         print()  # 收尾换行：边到边打印的最后一块不带 \n，不补的话账单会贴在正文末尾
 
         print(f"首 token(ms): {answer.first_token_ms}")
@@ -104,7 +117,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return 3
 
-    answer = ask(prompt=args.prompt, model=args.model or settings.model, client=client)
+    answer = ask(
+        prompt=args.prompt,
+        model=args.model or settings.model,
+        client=client,
+        think=args.think,
+    )
 
     print(f"正文: {answer.text}")
     print(f"输入 token: {answer.prompt_tokens}")

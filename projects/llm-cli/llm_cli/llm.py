@@ -13,8 +13,13 @@
 
 import time
 from dataclasses import dataclass
+from typing import Any, Literal, cast
 
 from openai import OpenAI
+
+# 思考强度档：`None`（不传 = 厂商默认）+ 四档。
+# `off` = 关思考；`low` / `high` / `max` = 开思考并指定强度（官方有效档位就这三档）。
+ThinkLevel = Literal["off", "low", "high", "max"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +74,55 @@ class StreamAnswer:
     cached_tokens: int | None = None
 
 
-def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
-    """发一次请求，返回 `Answer`。
+def _thinking_kwargs(think: ThinkLevel | None) -> dict[str, Any]:
+    """把 `--think off|low|high|max` 翻成 **`create()` 的附加关键字参数**。
+
+    ⭐ **今天的练习就在这个函数体**（`None` 那条已给，剩下两条）—— 别改签名。
+
+    为什么返回「kwargs」而不是「一个 extra_body dict」：官方把这两个参数放在**不同通道**上
+    （见下第 3 条），塞进同一个 dict 就成了自己发明的一套走法。
+
+    官方原文（2026-11-26 查证 · 阿里云百炼《DeepSeek》页；与 DeepSeek 直连页冲突时以百炼为准）：
+      1. 默认值：「`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-v4-flash-0731` 和
+         `deepseek-v4-pro-0813` **默认开启思考模式**。通过 `reasoning_effort` 参数可以调整
+         推理强度，可选值为 `low`（仅 `deepseek-v4.1-flash`、`deepseek-v4-flash-0731` 和
+         `deepseek-v4-pro-0813` 支持）、`high` 和 `max`，**默认为 `high`**。」
+         ⇒ `None`（不传）**当天**等价于 `"high"`；显式传的意义是把默认权拿回来
+      2. 计费：「思考模式下，**思维链按照输出 Token 计费**」，`reasoning_tokens` 含在
+         `completion_tokens` 里 ⇒ 判据 ②（算 input 还是 output）有原文可引
+      3. 通道：「`enable_thinking` **非 OpenAI 标准参数**，OpenAI Python SDK 通过 `extra_body`
+         传入……`reasoning_effort` **是 OpenAI 标准参数**，可直接作为顶层参数传入。」
+         ⇒ 开关走 `extra_body={"enable_thinking": ...}`，强度走顶层 `reasoning_effort=...`
+      4. 文档空白（如实记）：百炼 DeepSeek 页**通篇没写**「思考模式下 `temperature` 不生效」，
+         DeepSeek 直连页则明写不支持 ⇒ 判据 ③ 只能**实测**，不许引百炼页当证据
+      5. 文档矛盾（如实记）：`low` 的支持清单含 `deepseek-v4.1-flash`，但同页推理强度示例
+         用的是 `deepseek-v4-pro`（**不在** low 清单）⇒ `low` 是否真能降下来，实测为准
+
+    三条口径：
+      · `None` ⇒ 返回 `{}`：一个参数都不加 ⇒ 请求体与关卡 0–4 **完全一致**（可复现性靠这条）
+      · `"off"` ⇒ **只**关思考，不顺手传强度：官方没写「关思考时 effort 该不该传」
+        （DeepSeek 页未说明、百炼页未列）⇒ 别赌
+      · 三个强度档 ⇒ **显式开 + 指定强度**：开要显式，因为「默认开启」是厂商承诺、会变；
+        写死才是我们的契约
+      ⚠️ 官方没有一处承诺「字段名写错会报错」⇒ 生效与否只能靠 `reasoning_tokens` +
+        耗时 + 文本一起反证，不能靠「我传了」。
+    """
+    if think is None:
+        return {}
+    if think == "off":
+        return {"extra_body": {"enable_thinking": False}}
+    return {"extra_body": {"enable_thinking": True}, "reasoning_effort": think}
+
+
+
+def ask(
+    prompt: str,
+    *,
+    model: str,
+    client: OpenAI,
+    think: ThinkLevel | None = None,
+) -> Answer:
+    """发一次请求，返回 `Answer`。`think` 的档位语义见 `_thinking_kwargs()`。
 
     ⚠️ 2026-11-22 改为**一行转调 `ask_messages()`** —— 记账段只在那边维护一份。
     原来这里另有一份一字不差的实现，两边一改就漂移（同一段类型收窄，写法差一个词，
@@ -88,10 +140,17 @@ def ask(prompt: str, *, model: str, client: OpenAI) -> Answer:
         [{"role": "user", "content": prompt}],
         model=model,
         client=client,
+        think=think,
     )
 
 
-def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) -> Answer:
+def ask_messages(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    client: OpenAI,
+    think: ThinkLevel | None = None,
+) -> Answer:
     """发一次**多轮**请求：`messages` = 完整历史 + 本次提问，返回 `Answer`。
 
     判据（L4 关卡 3）：每轮都要能从 `usage.prompt_tokens` 读到**整段历史**的 token 数 ——
@@ -102,11 +161,18 @@ def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) 
       · 计时包住整次请求 → 空 `choices` 就抛 → `usage is None` 就抛 →
         `content or ""` 兜底 → `finish_reason` 从 `choices[0]` 取
       · `model` 与两个 token 细分都取**上游回传**的，不取入参 / 不自算
+      · `think`（关卡 5 加）：经 `_thinking_kwargs()` 翻成 create() 的额外关键字参数；
+        `None` ⇒ `{}` ⇒ **一个参数都不加**，请求体与关卡 0–4 一模一样
     """
     started = time.perf_counter()
     response = client.chat.completions.create(
         model=model,
-        messages=messages,
+        # `messages` 是对外的 `list[dict[str, str]]`（`chat.py` 造的就是这个形状），
+        # SDK 要的是 `Iterable[ChatCompletionMessageParam]`（Union[TypedDict...]）。
+        # 形状 runtime 上完全对（只有 role/content 两个 str 字段），但静态收窄不过去 ⇒
+        # 在这里断言一次，而不是把 SDK 的类型泄漏到对外签名里（那会逼 `chat.py` 跟着改）
+        messages=cast("Any", messages),
+        **_thinking_kwargs(think),
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
     if not response.choices:
@@ -136,7 +202,13 @@ def ask_messages(messages: list[dict[str, str]], *, model: str, client: OpenAI) 
     )
 
 
-def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
+def ask_stream(
+    prompt: str,
+    *,
+    model: str,
+    client: OpenAI,
+    think: ThinkLevel | None = None,
+) -> StreamAnswer:
     """流式发一次请求：边到边收增量，同时记「首 token 何时到」与「总共多久」。
 
     判据（L4 关卡 1 ①，两个数都要报，且首 token 明显早于总时长）：
@@ -164,6 +236,10 @@ def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
         ⇒ 循环里 `break` 会自动关连接，不需要自己 try/finally
       · ② 官方 README：流消费**不会自动重试**（重放会重复输出）；读超时抛
         `APITimeoutError`，其它连接失败抛 `APIConnectionError`，原始异常在 `__cause__`
+
+    `think`（关卡 5 加，档位见 `_thinking_kwargs()`）：流式下思考增量走
+    `delta.reasoning_content`（与 `content` 并列）⇒ 上面第 3 条记的「纯 reasoning 帧
+    content=None」就是它。本函数**只记账不看内容**，思考 token 数仍从汇总帧取。
     """
     started = time.perf_counter()
     text = ""
@@ -183,6 +259,7 @@ def ask_stream(prompt: str, *, model: str, client: OpenAI) -> StreamAnswer:
         messages=[{"role": "user", "content": prompt}],
         stream=True,
         stream_options={"include_usage": True},
+        **_thinking_kwargs(think),
     )
     for chunk in stream:
         chunks += 1

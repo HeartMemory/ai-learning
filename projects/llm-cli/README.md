@@ -2,7 +2,7 @@
 
 **一句话**：把「调一次模型」做成能演示的命令行 —— 一条命令进去，正文、**输入 token / 输出 token / 耗时**一起出来。
 
-> L4（调用与可控）交付物。五关依次往上加：**关卡 0 打通与记账** → 关卡 1 流式 → 关卡 2 结构化输出 → 关卡 3 多轮与上下文记账 → **关卡 4 成本与 prompt**。**五关已全部通过（2026-11-19 ~ 11-22）**。
+> L4（调用与可控）交付物。六关依次往上加：**关卡 0 打通与记账** → 关卡 1 流式 → 关卡 2 结构化输出 → 关卡 3 多轮与上下文记账 → 关卡 4 成本与 prompt → **关卡 5 推理模型（`--think`）**。**六关已全部通过（2026-11-19 ~ 11-26）**。
 
 ## 怎么跑
 
@@ -112,6 +112,39 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | 守卫 | `cached > prompt` ⇒ `ValueError`（否则负成本）；`reasoning > completion` ⇒ `ValueError`（取错字段）；流式缺 usage ⇒ `ValueError`（不编 0） |
 | 展示 | `format_bill()` 打 6 位小数（单次只有几厘钱，2 位小数会显示 0.00）；**只用 GBK 可编码字符**（`¥` 在 cp936 下崩） |
 
+## 判据（L4 关卡 5 · 推理模型）
+
+跑法：`uv run python -m llm_cli "<问题>" --think off|low|high|max`。**不传 `--think` = 请求里一个参数都不加**（厂商默认：本模型默认**开思考**、effort 默认 `high`）。
+
+- [x] **① 同一题 on/off 各跑一次，打印两边 `usage` 与耗时** —— 实测四档（同一题，各 1 次，见下表）✅
+- [x] **② 说清 thinking token 算 input 还是 output** —— 算 **output**。官方原文（百炼 DeepSeek 页）：「思考模式下，**思维链按照输出 Token 计费**」；实测 `107 = 95 + 12`、`102 = 90 + 12`、`159 = 147 + 12`（可见输出恒 **11~12** token，`reasoning_tokens` 含在 `completion_tokens` 里）✅
+  - ⚠️ **反转点**：开思考还会多吃 **26 个输入 token**（**21 → 47**）—— 那段隐藏模板，与 2026-11-20 记的 `45 → 19 = 26` 完全一致（独立复现）
+- [x] **③ 复现「思考模式下 `temperature` 不生效」+ 两行可复现命令** —— **文档收口（降级：不新跑实验）** ✅
+  - 厂商原文：*"Thinking mode does not support the temperature, top_p, presence_penalty, or frequency_penalty parameters … setting these parameters will not trigger an error but will also have no effect."*
+  - 平台参数：`temperature` 范围 **[0, 2)**、`top_p` **（0,1.0]**（百炼《OpenAI兼容-Chat》）
+  - 已有实测（2026-11-20）：`bench.py` 钉 `temperature=0.0` 且思考默认开 ⇒ **首次分歧下标 0**、长度差 +3；`diag_thinking.py` 关思考 + 低熵题 ⇒ **差 = 0**
+  - 两行命令：`uv run python bench.py` ｜ `uv run python diag_thinking.py`
+
+> ⚠️ **口径偏离（如实记）**：判据原文写 `--think on|off`，落成 **`off|low|high|max` 四档** —— `on` 的等价物是 `high`（本模型默认 effort 就是 high）。理由 = 强度和开关是同一个官方参数族（`enable_thinking` + `reasoning_effort`），顺手一次做全。
+> ⚠️ **降级（如实记）**：判据 ③ 跳过了「新一轮温度对照实验」，理由 = 厂商原文明确「不报错也不生效」+ 已有同向实测 + 商用参数无造假动机。代价 = **这条没有本轮新数字**。
+
+### 四档实测（2026-11-26 · 同一题「9.9 和 9.11 哪个大」，各 1 次）
+
+| `--think` | 输入 | 输出 | 其中思考 | 耗时(ms) | 费用(元) |
+|---|---|---|---|---|---|
+| `off` | **21** | **11** | **None** | 1056.32 | **0.000130** |
+| `low` | 47 | 102 | 90 | 1231.50 | 0.000910 |
+| `high` | 47 | 107 | 95 | 1062.50 | 0.000950 |
+| `max` | 47 | 159 | **147** | 1562.97 | **0.001366** |
+
+| 结论 | 数字 |
+|---|---|
+| 关思考的收益 | 费用 **0.001366 → 0.000130（约 1/10）**、输入 **−26 token**、可见输出不变（11 vs 12） |
+| `reasoning_tokens` 的 `None` ≠ 0 | 关思考时供应商**整个不给** `completion_tokens_details`（`None`）；填 0 会谎称「思考免费」 |
+| 档位是否真生效 | `max` 明显（**147** vs 95），`low` 与 `high` 只差 **5** ⇒ **单题单次证明不了档位差异**，只记「方向一致」。参数页两行冲突（模型专属行说 `max/high/low`，系列行说 V4 的 `low`→`high`）⇒ 按**模型专属行优先**记，不做对比实验 |
+| 耗时不能当信号 | `high`（95 思考 token）**1062 ms** 比 `low`（90）**1232 ms** 还短 ⇒ 单次测量被网络/调度噪声盖住，要报耗时得多跑取中位数 |
+| 模型回传 | 四档都是 `deepseek-v4.1-flash-1017`、`finish_reason=stop`、正文一致（`9.9 大于 9.11`） |
+
 ## 崩溃安全（关卡 3 顺带做的，判据之外）
 
 | 机制 | 做法 | 实测 |
@@ -145,6 +178,8 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | `bench_prompt.py` → `score_one` | **你** | A 口径判据：正文 `strip()` 后必须**直接**是合法 JSON，键集合恰好 `{"category"}`、值 ∈ 4 类 |
 | `bench_prompt.py` → `run_variant` / `VariantResult` | AI（统计） | 循环 + 累加 token/成本 + 汇总表（含命中与思考列） |
 | `llm_cli/llm.py` → `ask()` | AI（转调） | 2026-11-22 起**一行转调** `ask_messages()`，记账只留一份 |
+| `llm_cli/llm.py` → `_thinking_kwargs()` | **你** | 四档 + 不传 → `create()` 的额外关键字参数：`enable_thinking` 走 `extra_body`、`reasoning_effort` 走**顶层**（两个通道，不能并成一个 dict） |
+| `llm_cli/cli.py` → `--think` 接线 | **你**（AI 只给接线说明） | `choices=list(get_args(ThinkLevel))` + `default=None`（不传 = 不加参数）+ 两处调用透传 + 一行档位打印 |
 
 退出码：`0` 成功 ｜ `1` 其它异常（含 `usage` 缺失、请求失败、**历史保存失败**）｜ `2` 参数 / 配置缺失（argparse 与 `config` 抛的）｜ `3` 跑通了但**正文为空**（已记账）。
 
@@ -235,7 +270,9 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | 请求异常（401 / 429 / 超时） | **当前不接**，让其冒泡 | 退出码仍是 `1`，traceback 里能直接看到 `openai` 的错误码；接不接属于「能不能说一句比栈更有用的话」 |
 | `--model ""` 空串 | 静默回落配置（`or` 的语义） | 已知行为，未额外校验 |
 | 温度钉在哪（关卡 1） | **只在测试层**（`bench.py` 的 `pin_request_defaults` 包一层 `create`），`llm_cli/llm.py` 不开参数 | 生产接口不该为测试方便留一个平时用不到的口子；厂商调好的默认值通常优于随手填的。代价 = **隐蔽**（只看 `llm.py` 会以为用默认值），所以在 `bench.py` 顶部显式标注 |
-| 「思考」开关要不要做成参数 | 暂不做 | 当前模型思考模式下 `temperature` 等一并不生效，做参数也没东西可控；等关卡 3（成本）要按 `reasoning_tokens` 折算时再谈 |
+| 「思考」开关要不要做成参数（关卡 5 补上） | 做成 `--think off\|low\|high\|max`，**默认不传** | 「不传 = 请求里不加参数」把默认权留在厂商，同时请求体与关卡 0–4 完全一致（可复现）；显式档位才是我们的契约。四档而非两档：`enable_thinking` 与 `reasoning_effort` 是同一族的官方参数，顺手做全 |
+| 两个思考参数走哪个通道 | `enable_thinking` → `extra_body`；`reasoning_effort` → **顶层** | 官方原文分得很清楚（前者「非 OpenAI 标准参数」，后者「是 OpenAI 标准参数」）；塞进同一个 dict 等于自己发明写法。实测 `inspect.signature(create)` 里只有后者 |
+| `think` 为什么是三态 + 四档而不是布尔 | `none \| off \| low \| high \| max` | 布尔丢掉强度；而「不传」和「传 high」今天效果相同、**契约不同**（前者默认权在平台）⇒ 必须能表达「我没指定」 |
 | 首 token 的口径 | **正文首个非空 `delta.content` 到达时刻**（不含 role 帧 / 终止帧 / 账单帧 / 纯思考帧） | 换个口径（如「首个字节到达」）数字差很大，跨模型不可比；口径必须写死才有对照意义 |
 | `strict` 放哪 | `response_format.json_schema.strict = True`，写在 `ask_structured`，**不做开关** | 不传 `strict` 就只是「提示模型按 schema 写」，20 次必挂几次；留开关等于给生产留一条静默降级路径 |
 | schema 写哪些关键字（关卡 2） | 只用两家**交集**：`type` / `enum` / `items` / `anyOf` / `required` / `additionalProperties` | OpenAI strict 子集不收 `minLength` / `pattern` / `minimum` / `minItems`（写了就 400），而业务口径（姓名非空、课程至少一项）本来就该校验层管 |
@@ -289,3 +326,9 @@ Select-String -Path .\llm_cli\*.py -Pattern 'api_key\s*=\s*"'   # 期望无输�
 | 打印账单时 `UnicodeEncodeError: 'gbk' codec can't encode '\xa5'` | `\xa5` 就是 `¥`。管道接住 stdout 时编码是 **cp936**，`¥` 与全角竖线都编不出来，而且崩在**钱已经花掉之后** ⇒ 单位写 `元`、分隔符用 ASCII |
 | `ZoneInfo("Asia/Shanghai")` 直接抛 `ZoneInfoNotFoundError` | Windows **不自带 IANA 时区库**（要用 `zoneinfo` 就得装 `tzdata`）⇒ 无跨时区需求时用 `timezone(timedelta(hours=8))` 固定偏移更省事 |
 | 平台「模型监控」只给调用次数，不给 token | ① 金额 0.002 元低于界面精度（0.01 元）；② token 数字实测约 **40 分钟**才可见（次数 10 分钟）；③ 统计**按请求名分组** —— 别名 `deepseek-v4.1-flash` 与快照名 `-1017` 是**两栏**，对账要按实际请求的那个名字筛 |
+| 把 `enable_thinking` 当顶层参数传 | 它不是 OpenAI 标准参数：`create()` 签名里没有它，且**没有 `**kwargs`** ⇒ 参数绑定阶段就 `TypeError`（不是静默忽略）。判定方法 = `inspect.signature(...create).parameters` 里有名字才顶层 |
+| 以为 `Literal[...]` 运行时会校验 | 类型标注只在静态层：实测 `_thinking_kwargs("bogus")` 原样返回 `reasoning_effort='bogus'`。运行时守门人是 argparse 的 `choices` —— 少了它，`--think bogus` 会一路发到服务端 |
+| 以为 `cast("Any", x)` 只是消警告 | 它让**该表达式后续全部**不检查（`messages=messages_text` 也能过）。有精确类型可写时不该用它；`bench.py` 那个 `cast("Any", completions)` 能为所欲为，是因为给实例属性赋值根本没有更精确的类型 |
+| 关思考后 `reasoning_tokens` 是 `None` 而不是 0 | 供应商整段不给 `completion_tokens_details`；写 0 等于谎称「思考免费」，`None` 才会被 `bill()` 正确地当「不参与计价」 |
+| 同一题开思考后输入 token 凭空多 **26** | 隐藏模板：**21（关）→ 47（开）**，可见输出仍是 11~12 ⇒ 思考的成本要两头算（输入 +26、输出大几倍），只看 `completion_tokens` 会低估 |
+| 用「单次耗时」比较思考档位 | `high`（95 思考 token）1062 ms 比 `low`（90）1232 ms 还短 ⇒ 网络/调度噪声就能盖过档位差异，耗时必须多次取中位数才可比 |
