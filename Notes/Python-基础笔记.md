@@ -1462,6 +1462,35 @@ hour >= 22 or hour < 8      # ✅
 
 ---
 
+## 第 17 章 · 注解与运行环境：`__future__` / `os.environ` / `__file__`（2026-11-27）
+
+### 1. `from __future__ import annotations` 在 3.14 已是"例外路径"
+- **3.14 起注解默认延迟求值**（PEP 649 + 749）：函数/类/模块的注解不再在定义时求值，而是存进专用的 annotate 函数，用到才算。实测 `def f(x: NoSuchName): pass` **定义时不报错**。
+- 官方原文：「It is no longer **necessary** to enclose annotations in strings if they contain forward references.」⇒ 前向引用直接写类名即可。
+- 加了 future 导入会**绕过**新机制、把注解**强制成字符串** ⇒ 没前向引用时，它是"主动退回旧语义"，不是"更保险"。
+- 想按需求值用 `annotationlib.get_annotations(f, format=Format.VALUE / FORWARDREF / STRING)`。
+
+### 2. `os.environ` 的三个反直觉点
+| 事实 | 后果 |
+|---|---|
+| 取出来**永远是 `str`**，且不替你 `strip()` | `LLM_MODEL= abc ` 带着空格 ⇒ "模型名看起来对、服务端说找不到" |
+| `[]` 缺失抛 `KeyError`；`.get()` 返回 `None` | 前者早报错（好），后者把错误推迟成 401 |
+| **Windows 的键不区分大小写**（写入会规范成大写），Linux **区分** | 本机 `llm_api_key` 能取到，部署到 Linux 取不到 ⇒ 变量名一律大写 |
+| 环境变量**会被子进程继承** | `subprocess` 起的东西能读到 key ⇒ 传 `env=` 白名单，别让 key 进子进程 |
+
+### 3. `Path(__file__).resolve().parent` vs `Path.cwd()`
+- `__file__` = **本模块文件的路径**（`python x.py` 时是脚本本身；被 `import` 时是模块文件）。`python -c` 与交互式**没有** `__file__`。
+- `.resolve()` = 转绝对 + 消 `.`/`..` + 解符号链接；`.parent` = 上一级目录。
+- 实测：项目目录内跑 / 仓库根跑，`cwd` 会变（`...\mini-agent` → `...\ai-learning`），而 `PROJECT_ROOT` 不变。
+- 所以「读同目录的配置/数据文件」必须用 `__file__` 推算：`load_dotenv()` 裸调用按 **cwd** 找 `.env`，换个目录跑就"明明填了却说缺配置"。
+- 打包成 wheel 后要读包内资源，正规写法是 `importlib.resources.files("pkg") / "data" / "x.txt"`（`__file__` 在 zip 导入下会失效）。
+
+### 4. `subprocess` 只能起**真实可执行文件**
+- `dir` / `type` / `echo` 是 `cmd.exe` 的**内置命令**，磁盘上没有对应 exe（`where dir` 无输出）。
+- 于是 `subprocess.run(["dir"], shell=False)` → `FileNotFoundError`；想跑只能 `cmd /c dir`，但那会把 shell 的解析面（`&`、`|`、`>`）拉回来。
+- 结论：白名单只能放**真 exe**（如 `git.exe`、`findstr.exe`），"列目录"这类内置能力用自己的代码实现，别绕 shell。
+- 另外两个必须配套的参数：`timeout=`（否则一步卡死整条链）与输出截断（命令输出会原样回灌进 messages）。
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容 —— 避免"抄来的笔记"占位。

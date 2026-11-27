@@ -1664,6 +1664,69 @@ DeepSeek 原文：*"Thinking mode does not support the temperature, top_p, prese
 
 ---
 
+## 第 22 章 · Agent 权限模型：两个旋钮，不是三个档位（2026-11-27 · L5 开工前）
+
+### 一句话
+「只读 / 工作区 / 完全权限」是**给人看的三个预设**，底下是**两个正交旋钮**：`沙箱模式`（技术上能做什么）× `审批策略`（什么时候必须先问你）。**档位管不到边界 —— 边界在操作系统手里。**
+
+### 两个旋钮
+| 旋钮 | 回答什么 | 典型取值 |
+|---|---|---|
+| 沙箱模式（sandbox mode） | 这次执行**能看见、能写哪些路径** | `read-only` / `workspace-write` / `danger-full-access` |
+| 审批策略（approval policy） | 动手**之前要不要问一句** | `on-request` / `never`（旧版还有 `on-failure`，2026-06 起按 `on-request` 解析） |
+
+两个旋钮打包成预设（DeepSeek Harness 的写法）：
+
+| preset | mode | approval | 行为 |
+|---|---|---|---|
+| `workspace-write`（默认） | workspace-write | ask/on-request | 工作区内自由改，**越界 / 联网 / 动工作区外文件才问** |
+| `read-only` | read-only | ask | 只读，操作需确认 |
+| `danger-full-access` | danger-full-access | never | 全放行，无批准门 |
+
+两个旋钮拼不出预设表里的组合时，状态显示为 `custom`（**只能显示、不能设**）—— 说明作者有意把"无法解释的中间态"排除在可选之外。
+
+### 关键一句（各平台文档的共识）
+> "**它不是沙箱，真正的文件访问边界在沙箱。**" —— 权限体系只决定"放不放行"，**强制**要靠沙箱后端。
+
+因此：**没有沙箱后端时，三档只是提示层**。诚实的做法是显式标注 `sandbox_backend=none`，而不是假装有边界。
+
+### 各平台的后端（都不约而同选了 OS 原生机制，不是 Docker）
+| 平台 | 机制 |
+|---|---|
+| macOS | Seatbelt（`sandbox-exec`） |
+| Linux | bubblewrap（mount namespace）或 Landlock |
+| **Windows** | **ACL + 受限令牌（Write-Restricted Token）** |
+
+Codex 的 Windows 实现（官方工程文）评估并否掉了三个"现成方案"：
+- **AppContainer** —— 为"功能边界清晰的应用"设计，跑 shell / Git / Python / 构建工具时形状不对；
+- **Windows Sandbox** —— 隔离的另一个桌面，作用不到用户的真实仓库，且 Home 版没有；
+- **Mandatory Integrity Control** —— 把工作区标 Low 等于所有 Low 进程都能写，破坏信任模型。
+
+最终用「合成 SID + ACL + Write-Restricted Token」，且必须拆出一个 runner 进程：真用户进程**不能可靠地**用受限令牌启动子进程 ⇒ 先以沙箱身份起 runner，再由 runner 创建受限令牌启动命令。
+
+### 三条实现层面的坑（比档位本身更重要）
+1. **只有子进程受约束**。解释器自己 `open()` 不受令牌影响 ⇒ 真边界必须把所有文件操作搬进受限子进程（工具层改 runner）。
+2. **只挡写、不挡读**。`WRITE_RESTRICTED` 不对读做双重检查 ⇒ 挡不住"读走 `.env` 里的 key"；那条要用**子进程环境白名单**（key 干脆不传进去），比沙箱更直接。
+3. **没后端时必须 fail-closed**。DSH 的行为是返回 `SANDBOX_UNAVAILABLE` 而不是裸跑；反过来"静默降级成不受限"是最危险的失败模式。
+
+### 白名单的三个教训
+- **按"命令第一个词"白名单不够**：`git` 合法但 `git clean -fdx` 删文件、`git -c alias.x=!cmd` 注入 ⇒ 必须卡到子命令与危险开关；
+- **图灵完备的解释器不能进白名单**：`python` 一旦放行，`python -c "shutil.rmtree(...)"` 等于白名单不存在；
+- **粒度错一个字就全漏**：某客户端把**裸域名**写进预批准名单，该域名下任意路径都不再提示（CVE-2026-54316）⇒ 白名单条目要细到路径/参数。
+
+### 与我们 L5 的对应
+| 层 | 我们的做法 |
+|---|---|
+| 预设 | 照抄三档（`read-only` / `workspace-write` / `danger`）× 审批（`on-request` / `never`） |
+| 后端 | **先标 `none`**（代码级路径校验 = 约束不是隔离），另立项目做 Windows 受限令牌 |
+| 命令 | 白名单 `git status\|diff\|log` + `findstr`；`shell=False`；10 s 超时；输出截断 |
+| 密钥 | 子进程 env 白名单，`LLM_API_KEY` 永不进子进程 |
+
+### 判据怎么设计才"有牙"
+沙箱探针必须有**反向对照**：同一段"写沙箱外"的代码，**不开令牌时应当成功**。
+没有这条，沙箱外写失败可能只是"那个路径本来就不能写"，你会把"没生效"当成"生效了"。
+（与 L2 关 2 的「掩码 Δ=0 必须配不掩码对照」同族。）
+
 ## 附录 · 待学章节（计划编号 · 学到时展开成正文）
 
 > 只列主题，不提前写内容——避免"抄来的笔记"占位。编号沿用计划表，与正文章号不强制对应。
