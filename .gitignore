@@ -17,6 +17,8 @@ secrets.*
 
 # ===== 运行产物（trace / 日志 / 缓存 / 权重）=====
 *.log
+# 沙箱探针的沙箱根目录（受限令牌唯一可写位置，运行时生成）
+.sandbox-root/
 runs/
 .cache/
 *.pt
